@@ -1,0 +1,103 @@
+model:
+  provider: openai_like
+  id: gpt-4o-mini
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  structured_outputs: auto
+
+discord:
+  token_env: DISCORD_BOT_TOKEN
+
+memory:
+  mode: automatic
+  db_file: data/bitdoze.db
+  add_history_to_context: true
+  num_history_runs: 8
+  read_chat_history: true
+  search_session_history: true
+  num_history_sessions: 3
+  add_memories_to_context: true
+  enable_session_summaries: true
+  add_session_summary_to_context: true
+  summary_prompt: |
+    You are generating a session summary. Return ONLY a JSON object.
+    Required keys:
+      - summary: string (required, must be present)
+      - topics: array of strings (optional)
+    Use lowercase keys exactly as shown. Do not add extra keys or prose.
+  summary_request_message: "Return JSON only. Include the required key: summary."
+
+toolkits:
+  web_search:
+    enabled: true
+    backend: duckduckgo
+  hackernews:
+    enabled: true
+  website:
+    enabled: true
+  github:
+    enabled: true
+    token_env: GITHUB_ACCESS_TOKEN
+    base_url: null
+  youtube:
+    enabled: true
+    languages: [en]
+  file:
+    enabled: true
+    base_dir: workspace
+  shell:
+    enabled: true
+    base_dir: workspace
+  discord:
+    enabled: true
+
+heartbeat:
+  enabled: true
+  interval_minutes: 30
+  quiet_ack: HEARTBEAT_OK
+  prompt_path: workspace/HEARTBEAT.md
+  channel_id: null
+
+cron:
+  path: workspace/CRON.yaml
+
+soul:
+  path: workspace/SOUL.md
+
+context:
+  add_datetime: true
+  timezone_identifier: Europe/Bucharest
+  agents_path: workspace/AGENTS.md
+  user_path: workspace/USER.md
+  memory_dir: workspace/memory
+  long_memory_path: workspace/MEMORY.md
+  main_session_scope: dm_only
+
+agents:
+  base_instructions: |
+    You have access to a separate research agent named "research" that is better suited
+    for heavy web research (HackerNews, GitHub, YouTube). If a request requires deep
+    research, route it by asking the user to prefix their message with "research:" or
+    explicitly mentioning "agent:research".
+  default: main
+  definitions:
+    - name: main
+      tools: [web_search, hackernews, website, github, youtube, file, shell, discord]
+      skills: []
+      instructions: ""
+    - name: research
+      tools: [web_search, hackernews, website, github, youtube]
+      skills: [web-research]
+      instructions: ""
+  routing:
+    rules:
+      - agent: research
+        channel_ids: []
+        user_ids: []
+        guild_ids: []
+        contains: ["research:"]
+        starts_with: ["research:"]
+
+skills:
+  enabled: true
+  directories: [skills]

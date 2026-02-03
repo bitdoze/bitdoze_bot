@@ -1,0 +1,20 @@
+[project]
+name = "bitdoze-bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "agno",
+    "beautifulsoup4",
+    "ddgs",
+    "discord-py",
+    "openai>=2.16.0",
+    "apscheduler",
+    "python-dotenv",
+    "pyyaml",
+    "requests>=2.32.5",
+    "PyGithub",
+    "sqlalchemy>=2.0.46",
+    "youtube-transcript-api",
+]
