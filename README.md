@@ -46,6 +46,7 @@ Edit `config.yaml`:
 - `model.structured_outputs`: set `false` for providers that reject response_format (e.g., StepFun/OpenRouter)
 - `discord`: bot token env var
 - `memory`: `mode: automatic` (best capture), SQLite db path, history + summaries (custom prompt supported)
+- `learning`: enable Agno LearningMachine and set learning modes (`always`, `agentic`, `propose`, `hitl`)
 - `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, discord tools
 - `heartbeat`: 30-min cadence, optional channel override
 - `cron`: schedule jobs via `workspace/CRON.yaml`
@@ -55,6 +56,24 @@ Edit `config.yaml`:
 - `context.agents_path`: load workspace instructions into system context
 - `context.user_path` + `context.memory_dir` + `context.long_memory_path`: load USER + daily memory + long memory
 - `context.main_session_scope`: `dm_only` (default) or `always` for long memory
+
+### Learning Modes (Agno)
+Configure learning in `config.yaml`:
+
+```yaml
+learning:
+  enabled: true
+  mode: always # default mode for enabled stores
+  stores:
+    user_profile: true
+    user_memory: true
+    session_context: false
+```
+
+For each store, you can use:
+- `true` / `false`
+- a mode string: `always`, `agentic`, `propose`, `hitl`
+- an object with `{ enabled, mode, ... }` for advanced per-store options
 
 ## Routing Rules (Agent Selection)
 By default, the bot replies with the `default` agent. You can add routing rules:

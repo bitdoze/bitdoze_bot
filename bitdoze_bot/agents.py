@@ -6,6 +6,16 @@ from pathlib import Path
 from typing import Any
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
+from agno.learn import (
+    DecisionLogConfig,
+    EntityMemoryConfig,
+    LearnedKnowledgeConfig,
+    LearningMachine,
+    LearningMode,
+    SessionContextConfig,
+    UserMemoryConfig,
+    UserProfileConfig,
+)
 from agno.models.openai.like import OpenAILike
 from agno.skills import LocalSkills, Skills
 from agno.session import SessionSummaryManager
@@ -116,6 +126,84 @@ def _build_tools(config: Config) -> dict[str, Any]:
     return tools
 
 
+def _coerce_learning_mode(value: str) -> LearningMode:
+    try:
+        return LearningMode(str(value).strip().lower())
+    except ValueError as exc:
+        raise ValueError(
+            f"Unsupported learning mode '{value}'. Supported: always, agentic, propose, hitl."
+        ) from exc
+
+
+def _build_learning_store(
+    store_name: str,
+    store_value: Any,
+    default_mode: LearningMode,
+    config_cls: type,
+) -> Any:
+    if isinstance(store_value, bool):
+        if not store_value:
+            return False
+        return config_cls(mode=default_mode)
+    if isinstance(store_value, str):
+        return config_cls(mode=_coerce_learning_mode(store_value))
+    if isinstance(store_value, dict):
+        enabled = bool(store_value.get("enabled", True))
+        if not enabled:
+            return False
+        mode_value = store_value.get("mode", default_mode.value)
+        mode = _coerce_learning_mode(mode_value)
+        extra = {k: v for k, v in store_value.items() if k not in {"enabled", "mode"}}
+        return config_cls(mode=mode, **extra)
+    raise ValueError(
+        f"Invalid learning store config for '{store_name}'. Use bool, mode string, or mapping."
+    )
+
+
+def _build_learning(config: Config, db: SqliteDb, model: OpenAILike, agent_def: dict[str, Any]) -> tuple[Any, bool]:
+    learning_cfg = dict(config.get("learning", default={}) or {})
+    agent_learning_cfg = agent_def.get("learning", {})
+    if isinstance(agent_learning_cfg, dict):
+        learning_cfg.update(agent_learning_cfg)
+
+    if not learning_cfg or not learning_cfg.get("enabled", False):
+        return None, True
+
+    default_mode = _coerce_learning_mode(learning_cfg.get("mode", "always"))
+    stores_cfg = learning_cfg.get("stores", {}) or {}
+
+    store_builders: dict[str, tuple[type, bool]] = {
+        "user_profile": (UserProfileConfig, True),
+        "user_memory": (UserMemoryConfig, True),
+        "session_context": (SessionContextConfig, False),
+        "entity_memory": (EntityMemoryConfig, False),
+        "learned_knowledge": (LearnedKnowledgeConfig, False),
+        "decision_log": (DecisionLogConfig, False),
+    }
+    store_values: dict[str, Any] = {}
+    for store_name, (config_cls, default_enabled) in store_builders.items():
+        raw_value = stores_cfg.get(store_name, default_enabled)
+        store_values[store_name] = _build_learning_store(
+            store_name=store_name,
+            store_value=raw_value,
+            default_mode=default_mode,
+            config_cls=config_cls,
+        )
+
+    learning = LearningMachine(
+        db=db,
+        model=model,
+        user_profile=store_values["user_profile"],
+        user_memory=store_values["user_memory"],
+        session_context=store_values["session_context"],
+        entity_memory=store_values["entity_memory"],
+        learned_knowledge=store_values["learned_knowledge"],
+        decision_log=store_values["decision_log"],
+    )
+    add_learnings_to_context = bool(learning_cfg.get("add_to_context", True))
+    return learning, add_learnings_to_context
+
+
 def _resolve_instructions(
     config: Config,
     extra: str = "",
@@ -213,6 +301,7 @@ def build_agents(config: Config) -> AgentRegistry:
                 summary_request_message=summary_request_message
                 or "Return a JSON object with keys summary and topics.",
             )
+        learning, add_learnings_to_context = _build_learning(config, db, model, agent_def)
 
         agent = Agent(
             name=name,
@@ -235,6 +324,8 @@ def build_agents(config: Config) -> AgentRegistry:
             add_datetime_to_context=add_datetime,
             timezone_identifier=timezone_identifier,
             skills=skills_loader,
+            learning=learning,
+            add_learnings_to_context=add_learnings_to_context,
         )
         registry[name] = agent
 
