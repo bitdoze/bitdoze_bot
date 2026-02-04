@@ -62,6 +62,12 @@ toolkits:
         base_dir: workspace
     discord:
         enabled: true
+    tasks:
+        enabled: true
+    collaboration:
+        enabled: true
+    bridge:
+        enabled: true
 
 heartbeat:
     enabled: true
@@ -80,18 +86,25 @@ context:
     add_datetime: true
     timezone_identifier: Europe/Bucharest
     agents_path: workspace/AGENTS.md
+    tasks_dir: workspace/tasks
+    tasks_path: workspace/tasks/README.md
+    specs_dir: workspace/team/specs
+    handoffs_dir: workspace/team/handoffs
+    team_readme_path: workspace/team/README.md
     user_path: workspace/USER.md
     memory_dir: workspace/memory
     long_memory_path: workspace/MEMORY.md
     main_session_scope: dm_only
 
 agents:
+    team_directory: workspace/agents
+    per_agent_workspace: false
     base_instructions: |
         You have access to a separate research agent named "research" that is better suited
         for heavy web research (HackerNews, GitHub, YouTube). If a request requires deep
         research, route it by asking the user to prefix their message with "research:" or
         explicitly mentioning "agent:research".
-    default: main
+    default: build-team
     definitions:
         - name: main
           tools:
@@ -103,6 +116,9 @@ agents:
                   youtube,
                   file,
                   shell,
+                  tasks,
+                  collaboration,
+                  bridge,
                   discord,
               ]
           skills: []
@@ -119,6 +135,28 @@ agents:
               guild_ids: []
               contains: ["research:"]
               starts_with: ["research:"]
+
+teams:
+    enabled: true
+    default: build-team
+    base_instructions: |
+        You are a coordinated engineering team. Route architecture/planning to architect
+        and implementation/testing to software-engineer.
+    definitions:
+        - name: build-team
+          members: [architect, software-engineer]
+          tools: [tasks, collaboration, bridge]
+          respond_directly: true
+          determine_input_for_members: true
+          delegate_to_all_members: false
+          add_member_tools_to_context: false
+          share_member_interactions: true
+          instructions: |
+              Coordinate through `workspace/tasks/board.yaml`.
+              Ensure every substantial request becomes a task with clear owner/status.
+              Members must update task status/notes themselves as work progresses.
+              Specs must be written only in `workspace/team/specs/`.
+              Use `tasks` and `collaboration` tools for task/spec work, not raw file tools.
 
 skills:
     enabled: true

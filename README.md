@@ -47,13 +47,17 @@ Edit `config.yaml`:
 - `discord`: bot token env var
 - `memory`: `mode: automatic` (best capture), SQLite db path, history + summaries (custom prompt supported)
 - `learning`: enable Agno LearningMachine and set learning modes (`always`, `agentic`, `propose`, `hitl`)
-- `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, discord tools
+- `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, discord, tasks, collaboration tools
 - `heartbeat`: 30-min cadence, optional channel override
 - `cron`: schedule jobs via `workspace/CRON.yaml`
 - `agents`: define multiple agents, per-agent tool selections, and routing rules
+- `agents.team_directory`: auto-load extra agents from subfolders (`agent-config.yml` + `agents.md`)
+- `teams`: define Agno Teams that coordinate multiple agents (ex: `build-team`)
 - `skills`: optional skill packs loaded from `skills/`
 - `context`: enable datetime injection and set timezone
 - `context.agents_path`: load workspace instructions into system context
+- `context.tasks_dir` + `context.tasks_path`: shared task board folder/instructions for team agents
+- `context.specs_dir` + `context.handoffs_dir`: shared architect/engineer collaboration paths
 - `context.user_path` + `context.memory_dir` + `context.long_memory_path`: load USER + daily memory + long memory
 - `context.main_session_scope`: `dm_only` (default) or `always` for long memory
 
@@ -105,6 +109,95 @@ agents:
 ```
 
 Skill names must be lowercase and use hyphens, and must match the folder name.
+
+## External Team Agents
+You can auto-discover additional agents from a team folder:
+
+```text
+workspace/agents/
+  architect/
+    agent-config.yml
+    agents.md
+    workspace/
+  software-engineer/
+    agent-config.yml
+    agents.md
+    workspace/
+```
+
+`agent-config.yml` supports:
+- `name`
+- `model` (or top-level fields): `provider`, `id`, `base_url`, `api_key` or `api_key_env`
+- `tools`
+- `skills`
+- `learning`
+- `workspace` (defaults to `workspace` inside the agent folder)
+- `instructions`
+
+`agents.md` is optional and gets injected into that agent's system instructions.
+When `workspace` is set, `file` and `shell` tools are scoped to that folder for that agent.
+Use `tasks` in `tools` to let the agent manage the shared task board via safe task operations.
+To share the main project workspace, set `workspace: ../../..` in external agent configs.
+Use `collaboration` in `tools` for shared specs/handoffs (`write_spec`, `read_spec`, `write_handoff`).
+
+## Teams (Agno)
+You can define coordinated teams in `config.yaml`:
+
+```yaml
+teams:
+  enabled: true
+  default: build-team
+  definitions:
+    - name: build-team
+      members: [architect, software-engineer]
+```
+
+Use in Discord with `agent:build-team <your request>`.
+
+## Included Team Setup
+This repo now includes a ready-to-use team setup:
+
+- `workspace/agents/architect/agent-config.yml`
+- `workspace/agents/architect/agents.md`
+- `workspace/agents/software-engineer/agent-config.yml`
+- `workspace/agents/software-engineer/agents.md`
+- `workspace/tasks/board.yaml`
+- `workspace/tasks/README.md`
+
+Default behavior in `config.yaml`:
+- `agents.team_directory: workspace/agents`
+- `agents.default: build-team`
+- `teams.enabled: true`
+- `teams.default: build-team`
+
+So by default, the bot runs as a team (`architect` + `software-engineer`) and can coordinate work through `workspace/tasks/board.yaml`.
+
+## Shared Tasks Workspace
+The bot now keeps a shared tasks board at `workspace/tasks/`:
+- `workspace/tasks/board.yaml`
+- `workspace/tasks/board.v2.schema.json`
+- `workspace/tasks/events.log`
+- `workspace/tasks/README.md`
+- `workspace/tasks/notes/`
+
+On startup, these are auto-created if missing. The board is versioned and migrated
+automatically, validated on startup, and validated on every write.
+
+Task mutations use a lock-backed store and append an audit record to `events.log`.
+The `tasks` toolkit exposes safe operations (`create_task`, `update_status`, `assign_owner`,
+`set_dependencies`, `add_note`) so agents do not need to edit YAML manually.
+Each agent gets a tasks tool with its own default actor identity, so it can update tasks
+without manually passing `actor` each time.
+Also includes a `write_file` compatibility alias for file operations.
+
+## Shared Team Workspace
+The bot also keeps a shared collaboration workspace:
+- `workspace/team/specs/` (architect writes specifications)
+- `workspace/team/handoffs/` (engineer writes implementation handoffs)
+- `workspace/team/README.md`
+
+These locations are shared and accessible to both architect and software-engineer, independent
+of their own per-agent file/shell workspace settings.
 
 ## Notes
 - **Heartbeat** sends a proactive update every 30 minutes. If it returns `HEARTBEAT_OK`, the message is suppressed.

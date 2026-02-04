@@ -44,6 +44,8 @@ If you want to remember something, **write it to a file**. Don’t rely on “me
 - Skills follow Agno’s format (`SKILL.md` with YAML frontmatter).
 - When you need a tool, check the relevant skill first.
 - Keep machine-specific info in `workspace/TOOLS.md`.
+- Shared tasks live in `workspace/tasks/board.yaml` (status, owner, dependencies, notes).
+- Prefer task operations through the `tasks` tool instead of editing task YAML by hand.
 
 ## Heartbeat vs Cron
 

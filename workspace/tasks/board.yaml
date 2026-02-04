@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=./board.v2.schema.json
+version: 2
+updated_at: '2026-02-04T15:07:40Z'
+tasks:
+- id: task-001
+  title: Plan HTML Website Structure
+  status: done
+  owner: architect
+  depends_on: []
+  updated_at: '2026-02-04T12:55:00Z'
+  notes:
+  - Created detailed specification for simple HTML website
+  - Specification saved to workspace/specifications/simple-website-spec.md
+  - Includes layout structure (semantic HTML), color palette, typography, responsive
+    breakpoints, and accessibility considerations
+  - Design is clean, modern, and WCAG 2.1 AA compliant
+  - Specification ready for software-engineer implementation
+  blocked_reason: ''
+- id: task-002
+  title: Build Simple HTML Website
+  status: done
+  owner: software-engineer
+  depends_on:
+  - task-001
+  updated_at: '2026-02-04T13:09:02Z'
+  notes:
+  - Implement HTML website according to specification in workspace/specifications/simple-website-spec.md
+  - Create index.html with semantic HTML structure (header, main, sections, CTA, footer)
+  - Create styles.css with color palette, typography, and responsive breakpoints
+  - Optionally create script.js for mobile menu and smooth scrolling
+  - "Implement responsive design for mobile (< 768px), tablet (768px - 1023px), and\
+    \ desktop (\u2265 1024px)"
+  - Ensure WCAG 2.1 AA accessibility compliance
+  - Use system fonts and inline SVG icons (zero external dependencies)
+  - Test across multiple browsers and screen sizes
+  - 'Target performance: < 40KB total bundle size'
+  - '[2026-02-04T13:05:53Z] software-engineer: Starting implementation of the simple
+    HTML website based on the specification'
+  - "[2026-02-04T13:09:02Z] software-engineer: Implementation complete. Created three\
+    \ files in workspace/: index.html (8.8K), styles.css (16K), script.js (7.2K).\
+    \ Total bundle: 32KB (under 40KB target). Features: responsive header with sticky\
+    \ positioning and hamburger menu (slide-in drawer), hero section with gradient\
+    \ background, about section with content, services section with 3-card grid, full-width\
+    \ CTA section, 4-column footer with social links (Twitter, LinkedIn, GitHub).\
+    \ All using specified color palette (#3B82F6 primary, #10B981 secondary), system\
+    \ fonts, modular type scale, and WCAG 2.1 AA accessibility (skip link, ARIA labels,\
+    \ focus indicators, semantic HTML, keyboard navigation, prefers-reduced-motion\
+    \ support). Responsive breakpoints: mobile (<768px), tablet (768-1023px), desktop\
+    \ (\u22651024px). Zero external dependencies - all icons are inline SVGs."
+  blocked_reason: ''

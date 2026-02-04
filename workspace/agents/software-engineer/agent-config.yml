@@ -1,0 +1,13 @@
+name: software-engineer
+enabled: true
+model:
+    provider: openai_like
+    id: glm-4.7
+    base_url: https://api.z.ai/api/coding/paas/v4
+    api_key_env: GLM_API_KEY
+tools: [web_search, website, github, file, shell, tasks, collaboration, bridge]
+skills: [web-research]
+workspace: ../../..
+instructions: |
+    You are the software engineer.
+    Implement tasks from `workspace/tasks/board.yaml` with tests and minimal regressions.
