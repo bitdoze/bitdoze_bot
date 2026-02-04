@@ -2,19 +2,19 @@ enabled: true
 timezone: Europe/Bucharest
 channel_id: 1395291091627937906
 jobs:
-  - name: daily-status
-    cron: "0 9 * * *"
-    timezone: Europe/Bucharest
-    agent: main
-    message: "Send a daily status update."
-    deliver: true
-    channel_id: null
-    session_scope: isolated
-  - name: hourly-ai-news
-    cron: "0 * * * *"
-    timezone: Europe/Bucharest
-    agent: main
-    message: "Fetch the latest AI news from web, Hacker News, and GitHub, and provide a concise summary formatted for Discord."
-    deliver: true
-    channel_id: null
-    session_scope: isolated
+    - name: daily-status
+      cron: "0 9 * * *"
+      timezone: Europe/Bucharest
+      agent: main
+      message: "Send a daily status update."
+      deliver: true
+      channel_id: null
+      session_scope: isolated
+    - name: hourly-ai-news
+      cron: "0 * * * *"
+      timezone: Europe/Bucharest
+      agent: main
+      message: "Fetch the latest AI news from web, Hacker News, and GitHub, and provide a concise summary formatted for Discord."
+      deliver: true
+      channel_id: null
+      session_scope: isolated

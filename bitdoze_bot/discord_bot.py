@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -213,7 +214,9 @@ class DiscordAgentBot(commands.Bot):
                     user_id=user_id,
                     session_id=session_id,
                 )
-                reply = getattr(response, "content", None) or str(response)
+            reply = getattr(response, "content", None) or str(response)
+            if "<tool_call>" in reply:
+                reply = await _handle_toolcall_fallback(agent, reply)
         except Exception as exc:  # noqa: BLE001
             await message.channel.send(f"Error: {exc}")
             return
@@ -317,6 +320,61 @@ async def _send_chunked(channel: discord.abc.Messageable, content: str) -> None:
         chunks.append(remaining)
     for chunk in chunks:
         await channel.send(chunk)
+
+
+def _parse_tool_calls(text: str) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+    for block in re.findall(r"<tool_call>(.*?)</tool_call>", text, flags=re.DOTALL):
+        func_match = re.search(r"<function=([a-zA-Z0-9_]+)>", block)
+        if not func_match:
+            continue
+        func_name = func_match.group(1)
+        params: dict[str, object] = {}
+        for p_match in re.findall(r"<parameter=([a-zA-Z0-9_]+)>(.*?)</parameter>", block, flags=re.DOTALL):
+            key = p_match[0]
+            value = p_match[1].strip()
+            if value.isdigit():
+                params[key] = int(value)
+            else:
+                try:
+                    params[key] = json.loads(value)
+                except Exception:
+                    params[key] = value
+        calls.append({"name": func_name, "params": params})
+    return calls
+
+
+async def _run_tool_calls(agent, calls: list[dict[str, object]]) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    tools = getattr(agent, "tools", None) or []
+    for call in calls:
+        func_name = call["name"]
+        params = call["params"]
+        target = None
+        for tool in tools:
+            fn = getattr(tool, func_name, None)
+            if callable(fn):
+                target = fn
+                break
+        if target is None:
+            continue
+        output = await asyncio.to_thread(target, **params)
+        results.append({"name": func_name, "output": str(output)})
+    return results
+
+
+async def _handle_toolcall_fallback(agent, reply: str) -> str:
+    calls = _parse_tool_calls(reply)
+    if not calls:
+        return reply
+    results = await _run_tool_calls(agent, calls)
+    if not results:
+        return reply
+    prompt = "Summarize these tool results for Discord. Use bullets and include links when present.\n\n"
+    for item in results:
+        prompt += f"{item['name']}:\n{item['output']}\n\n"
+    response = await asyncio.to_thread(agent.run, prompt, user_id="tool_fallback", session_id="tool_fallback")
+    return getattr(response, "content", None) or str(response)
 
 
 def build_runtime(config_path: str) -> DiscordRuntime:
