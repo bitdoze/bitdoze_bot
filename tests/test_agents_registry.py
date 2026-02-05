@@ -140,6 +140,60 @@ class AgentsRegistryTests(unittest.TestCase):
             listed = bridge.list_files()
             self.assertIn("skills", listed)
 
+    def test_bridge_is_prioritized_before_file_and_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            agents_dir = workspace / "agents"
+            (agents_dir / "architect").mkdir(parents=True, exist_ok=True)
+            (agents_dir / "architect" / "agent-config.yml").write_text(
+                "name: architect\n"
+                "tools: [file, shell, bridge]\n",
+                encoding="utf-8",
+            )
+            (workspace / "AGENTS.md").write_text("global agent instructions", encoding="utf-8")
+            (workspace / "SOUL.md").write_text("soul", encoding="utf-8")
+
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                "model:\n"
+                "  provider: openai_like\n"
+                "  id: gpt-4o-mini\n"
+                "  api_key: dummy\n"
+                "toolkits:\n"
+                "  web_search: {enabled: false}\n"
+                "  hackernews: {enabled: false}\n"
+                "  website: {enabled: false}\n"
+                "  github: {enabled: false}\n"
+                "  youtube: {enabled: false}\n"
+                "  file: {enabled: true, base_dir: workspace}\n"
+                "  shell: {enabled: true, base_dir: workspace}\n"
+                "  discord: {enabled: false}\n"
+                "  tasks: {enabled: false}\n"
+                "  collaboration: {enabled: false}\n"
+                "  bridge: {enabled: true}\n"
+                "context:\n"
+                "  tasks_dir: workspace/tasks\n"
+                "  tasks_path: workspace/tasks/README.md\n"
+                "  agents_path: workspace/AGENTS.md\n"
+                "soul:\n"
+                "  path: workspace/SOUL.md\n"
+                "agents:\n"
+                "  default: architect\n"
+                "  team_directory: workspace/agents\n"
+                "  definitions: []\n"
+                "teams:\n"
+                "  enabled: false\n",
+                encoding="utf-8",
+            )
+
+            cfg = load_config(config_path)
+            registry = build_agents(cfg)
+            architect = registry.standalone_agents["architect"]
+            tool_names = [getattr(tool, "name", type(tool).__name__) for tool in architect.tools or []]
+            self.assertTrue(tool_names)
+            self.assertEqual(tool_names[0], "bridge_tools")
+
 
 if __name__ == "__main__":
     unittest.main()

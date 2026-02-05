@@ -135,10 +135,8 @@ workspace/agents/
 - `instructions`
 
 `agents.md` is optional and gets injected into that agent's system instructions.
-When `workspace` is set, `file` and `shell` tools are scoped to that folder for that agent.
-Use `tasks` in `tools` to let the agent manage the shared task board via safe task operations.
-To share the main project workspace, set `workspace: ../../..` in external agent configs.
-Use `collaboration` in `tools` for shared specs/handoffs (`write_spec`, `read_spec`, `write_handoff`).
+Use `tools: [bridge]` for a simpler setup with one toolkit exposing file/shell/task/spec/handoff
+helpers plus web/github/youtube wrappers. To share the main project workspace, set `workspace: ../../..`.
 
 ## Teams (Agno)
 You can define coordinated teams in `config.yaml`:
@@ -188,7 +186,7 @@ The `tasks` toolkit exposes safe operations (`create_task`, `update_status`, `as
 `set_dependencies`, `add_note`) so agents do not need to edit YAML manually.
 Each agent gets a tasks tool with its own default actor identity, so it can update tasks
 without manually passing `actor` each time.
-Also includes a `write_file` compatibility alias for file operations.
+Bridge also exposes these task operations as compatibility aliases.
 
 ## Shared Team Workspace
 The bot also keeps a shared collaboration workspace:

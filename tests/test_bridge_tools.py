@@ -32,6 +32,27 @@ class BridgeToolsTests(unittest.TestCase):
             fetched = tools.get_task(task_id="task-999")
             self.assertEqual(fetched["task"]["id"], "task-999")
 
+    def test_shell_and_file_compatibility_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools = BridgeTools(
+                workspace_dir=root / "workspace",
+                tasks_dir=root / "workspace" / "tasks",
+                default_actor="architect",
+            )
+            tools.save_file(path="workspace/notes.txt", contents="hello")
+            text = tools.read_file(path="workspace/notes.txt")
+            self.assertEqual(text, "hello")
+
+            listed = tools.list_files(path="workspace", pattern="*.txt")
+            self.assertIn("notes.txt", listed)
+
+            output = tools.run_shell_command(args=["ls -la"])
+            self.assertIn("notes.txt", output)
+
+            pwd = tools.run_shell_command(args="[pwd]")
+            self.assertIn("workspace", pwd)
+
 
 if __name__ == "__main__":
     unittest.main()

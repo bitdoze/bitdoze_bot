@@ -84,6 +84,53 @@ class BridgeTools(Toolkit):
             ],
         )
 
+    def _normalize_workspace_path(self, value: str) -> str:
+        target = value.strip()
+        if not target:
+            return target
+        base_dir = self.file_tools.base_dir.resolve()
+        raw_path = Path(target)
+        if raw_path.is_absolute():
+            resolved = raw_path.resolve()
+            if base_dir not in [resolved, *resolved.parents]:
+                raise ValueError("Path escapes workspace.")
+            relative = resolved.relative_to(base_dir)
+            return "." if str(relative) == "." else relative.as_posix()
+        if target.startswith("./"):
+            target = target[2:]
+        workspace_name = base_dir.name
+        prefix = f"{workspace_name}/"
+        if target == workspace_name:
+            return "."
+        if target.startswith(prefix):
+            return target[len(prefix) :]
+        return target
+
+    def _coerce_shell_args(self, args: list[str] | str) -> list[str]:
+        if isinstance(args, str):
+            parsed = shlex.split(args)
+        else:
+            parsed = args
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise ValueError("run_shell_command args must be a list[str] or shell string.")
+        if len(parsed) == 1 and " " in parsed[0].strip():
+            parsed = shlex.split(parsed[0])
+        cleaned: list[str] = []
+        for item in parsed:
+            value = item.strip().strip(",")
+            if value in {"[", "]"}:
+                continue
+            if value.startswith("["):
+                value = value[1:]
+            if value.endswith("]"):
+                value = value[:-1]
+            value = value.strip().strip("'").strip('"')
+            if value:
+                cleaned.append(value)
+        if not cleaned:
+            raise ValueError("run_shell_command requires at least one command token.")
+        return cleaned
+
     def get_available_tools(self) -> dict[str, Any]:
         return {
             "tools": [
@@ -128,7 +175,7 @@ class BridgeTools(Toolkit):
         return tool
 
     def read_file(self, file_name: str | None = None, path: str | None = None, encoding: str = "utf-8") -> str:
-        target = (file_name or path or "").strip()
+        target = self._normalize_workspace_path(file_name or path or "")
         if not target:
             raise ValueError("read_file requires file_name (or path).")
         return self.file_tools.read_file(file_name=target, encoding=encoding)
@@ -142,7 +189,7 @@ class BridgeTools(Toolkit):
         overwrite: bool = True,
         encoding: str = "utf-8",
     ) -> str:
-        target = (file_name or path or "").strip()
+        target = self._normalize_workspace_path(file_name or path or "")
         if not target:
             raise ValueError("save_file requires file_name (or path).")
         body = contents if contents is not None else content
@@ -158,15 +205,29 @@ class BridgeTools(Toolkit):
     def write_file(self, file_name: str | None = None, content: str | None = None, **kwargs: Any) -> str:
         return self.save_file(file_name=file_name, content=content, **kwargs)
 
-    def list_files(self) -> str:
-        return self.file_tools.list_files()
+    def list_files(
+        self,
+        path: str | None = None,
+        pattern: str | None = None,
+        recursive: bool = True,
+        **_: Any,
+    ) -> str:
+        if not path and not pattern:
+            return self.file_tools.list_files()
+        base = self.file_tools.base_dir
+        relative_path = self._normalize_workspace_path(path or ".")
+        scan_root = (base / relative_path).resolve()
+        if base not in [scan_root, *scan_root.parents]:
+            raise ValueError("Path escapes workspace.")
+        if not scan_root.exists():
+            return ""
+        glob_pattern = pattern or "*"
+        iterator = scan_root.rglob(glob_pattern) if recursive else scan_root.glob(glob_pattern)
+        files = sorted(str(item.relative_to(base)) for item in iterator if item.is_file())
+        return "\n".join(files)
 
     def run_shell_command(self, args: list[str] | str, tail: int = 120) -> str:
-        resolved_args = args
-        if isinstance(args, str):
-            resolved_args = shlex.split(args)
-        if not isinstance(resolved_args, list) or not all(isinstance(item, str) for item in resolved_args):
-            raise ValueError("run_shell_command args must be a list[str] or shell string.")
+        resolved_args = self._coerce_shell_args(args)
         return self.shell_tools.run_shell_command(args=resolved_args, tail=tail)
 
     def create_task(

@@ -3,7 +3,7 @@ model:
     id: stepfun/step-3.5-flash:free
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
-    structured_outputs: auto
+    structured_outputs: false
 
 discord:
     token_env: DISCORD_BOT_TOKEN
@@ -17,7 +17,7 @@ memory:
     search_session_history: true
     num_history_sessions: 3
     add_memories_to_context: true
-    enable_session_summaries: true
+    enable_session_summaries: false
     add_session_summary_to_context: true
     summary_prompt: |
         You are generating a session summary. Return ONLY a JSON object.
@@ -145,18 +145,20 @@ teams:
     definitions:
         - name: build-team
           members: [architect, software-engineer]
-          tools: [tasks, collaboration, bridge]
+          tools: [bridge]
           respond_directly: true
           determine_input_for_members: true
           delegate_to_all_members: false
-          add_member_tools_to_context: false
+          add_member_tools_to_context: true
           share_member_interactions: true
+          enable_session_summaries: false
           instructions: |
               Coordinate through `workspace/tasks/board.yaml`.
               Ensure every substantial request becomes a task with clear owner/status.
               Members must update task status/notes themselves as work progresses.
               Specs must be written only in `workspace/team/specs/`.
-              Use `tasks` and `collaboration` tools for task/spec work, not raw file tools.
+              Use bridge task/spec helpers (`create_task`, `update_status`, `write_spec`, `write_handoff`)
+              rather than raw file edits for team coordination artifacts.
 
 skills:
     enabled: true

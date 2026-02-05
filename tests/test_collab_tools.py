@@ -39,6 +39,19 @@ class CollaborationToolsTests(unittest.TestCase):
             listed = tools.list_files()
             self.assertIn("specs", listed)
 
+    def test_toolkit_exposes_only_spec_and_handoff_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools = CollaborationTools(
+                specs_dir=root / "workspace" / "team" / "specs",
+                handoffs_dir=root / "workspace" / "team" / "handoffs",
+            )
+            functions = set(tools.get_functions().keys())
+            self.assertIn("write_spec", functions)
+            self.assertIn("write_handoff", functions)
+            self.assertNotIn("read_file", functions)
+            self.assertNotIn("list_files", functions)
+
 
 if __name__ == "__main__":
     unittest.main()

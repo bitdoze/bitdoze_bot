@@ -124,6 +124,22 @@ class TaskBoardStoreTests(unittest.TestCase):
         events = (self.tasks_dir / "events.log").read_text(encoding="utf-8").strip().splitlines()
         self.assertGreaterEqual(len(events), 1)
 
+    def test_duplicate_task_id_is_auto_incremented(self) -> None:
+        first = self.store.create_task(
+            task_id="task-001",
+            title="First",
+            owner="architect",
+            actor="architect",
+        )
+        second = self.store.create_task(
+            task_id="task-001",
+            title="Second",
+            owner="architect",
+            actor="architect",
+        )
+        self.assertEqual(first["id"], "task-001")
+        self.assertEqual(second["id"], "task-002")
+
 
 if __name__ == "__main__":
     unittest.main()

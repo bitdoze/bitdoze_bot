@@ -33,7 +33,6 @@ from agno.tools.youtube import YouTubeTools
 
 from bitdoze_bot.bridge_tools import BridgeTools
 from bitdoze_bot.collab_tools import CollaborationTools
-from bitdoze_bot.compat_tools import FileCompatTools
 from bitdoze_bot.config import Config
 from bitdoze_bot.task_store import TaskBoardStore
 from bitdoze_bot.task_tools import TaskBoardTools
@@ -398,7 +397,9 @@ def _resolve_instructions(config: Config, extra_parts: list[str] | None = None) 
         f"- handoffs_dir: `{handoffs_dir}`\n"
         "- skills_dirs:\n"
         f"{skills_lines}\n\n"
-        "Tool-call rule: call `bridge.get_available_tools` first and use exact function names from that output."
+        "Path rule: repository instructions are in `workspace/AGENTS.md`.\n"
+        "If asked for `AGENTS.md`, use `workspace/AGENTS.md`.\n"
+        "Tool-call rule: call `get_available_tools` first and use exact function names from that output (no prefix)."
     )
 
     if extra_parts:
@@ -412,6 +413,18 @@ def _build_agent_tools(
     shared_tools: dict[str, Any],
     agent_def: dict[str, Any],
 ) -> list[Any]:
+    bridge_covered_tools = {
+        "file",
+        "shell",
+        "tasks",
+        "collaboration",
+        "web_search",
+        "website",
+        "hackernews",
+        "youtube",
+        "github",
+    }
+
     def _dedupe(items: list[str]) -> list[str]:
         seen: set[str] = set()
         ordered: list[str] = []
@@ -437,6 +450,8 @@ def _build_agent_tools(
         if bridge_enabled and "bridge" not in selected_names:
             selected_names.append("bridge")
     selected_names = _dedupe(selected_names)
+    if "bridge" in selected_names:
+        selected_names = ["bridge"] + [name for name in selected_names if name != "bridge"]
 
     workspace_dir_raw = agent_def.get("workspace_dir")
     workspace_dir = Path(workspace_dir_raw) if workspace_dir_raw else None
@@ -448,20 +463,23 @@ def _build_agent_tools(
 
     tasks_enabled = bool(config.get("toolkits", "tasks", "enabled", default=True))
     tasks_dir = _resolve_config_path(config, config.get("context", "tasks_dir", default="workspace/tasks"))
+    default_file_base = _resolve_config_path(
+        config,
+        config.get("toolkits", "file", "base_dir", default="workspace"),
+    )
+    default_file_base.mkdir(parents=True, exist_ok=True)
+    bridge_requested = bridge_enabled and "bridge" in selected_names
 
     agent_tools: list[Any] = []
     for tool_name in selected_names:
+        if bridge_requested and tool_name in bridge_covered_tools and tool_name != "bridge":
+            continue
         if tasks_enabled and tool_name == "tasks":
             actor_name = str(agent_def.get("name", "agent"))
             agent_tools.append(TaskBoardTools(tasks_dir=tasks_dir, default_actor=actor_name))
             continue
         if bridge_enabled and tool_name == "bridge":
             actor_name = str(agent_def.get("name", "agent"))
-            default_file_base = _resolve_config_path(
-                config,
-                config.get("toolkits", "file", "base_dir", default="workspace"),
-            )
-            default_file_base.mkdir(parents=True, exist_ok=True)
             bridge_workspace_dir = workspace_dir.resolve() if workspace_dir else default_file_base
             agent_tools.append(
                 BridgeTools(
@@ -480,19 +498,12 @@ def _build_agent_tools(
             continue
         if workspace_dir and tool_name == "file":
             agent_tools.append(FileTools(base_dir=workspace_dir))
-            agent_tools.append(FileCompatTools(base_dir=workspace_dir))
             continue
         if workspace_dir and tool_name == "shell":
             agent_tools.append(ShellTools(base_dir=workspace_dir))
             continue
-        agent_tools.append(shared_tools[tool_name])
-        if tool_name == "file":
-            default_file_base = _resolve_config_path(
-                config,
-                config.get("toolkits", "file", "base_dir", default="workspace"),
-            )
-            default_file_base.mkdir(parents=True, exist_ok=True)
-            agent_tools.append(FileCompatTools(base_dir=default_file_base))
+        if tool_name in shared_tools:
+            agent_tools.append(shared_tools[tool_name])
     return agent_tools
 
 
@@ -501,6 +512,18 @@ def _build_team_tools(
     shared_tools: dict[str, Any],
     team_def: dict[str, Any],
 ) -> list[Any] | None:
+    bridge_covered_tools = {
+        "file",
+        "shell",
+        "tasks",
+        "collaboration",
+        "web_search",
+        "website",
+        "hackernews",
+        "youtube",
+        "github",
+    }
+
     def _dedupe(items: list[str]) -> list[str]:
         seen: set[str] = set()
         ordered: list[str] = []
@@ -517,20 +540,25 @@ def _build_team_tools(
     tasks_enabled = bool(config.get("toolkits", "tasks", "enabled", default=True))
     bridge_enabled = bool(config.get("toolkits", "bridge", "enabled", default=True))
     tasks_dir = _resolve_config_path(config, config.get("context", "tasks_dir", default="workspace/tasks"))
+    default_file_base = _resolve_config_path(
+        config,
+        config.get("toolkits", "file", "base_dir", default="workspace"),
+    )
+    default_file_base.mkdir(parents=True, exist_ok=True)
     if bridge_enabled and "bridge" not in tool_names:
         tool_names = list(tool_names) + ["bridge"]
     tool_names = _dedupe(list(tool_names))
+    if "bridge" in tool_names:
+        tool_names = ["bridge"] + [name for name in tool_names if name != "bridge"]
+    bridge_requested = bridge_enabled and "bridge" in tool_names
     built_tools: list[Any] = []
     for tool_name in tool_names:
+        if bridge_requested and tool_name in bridge_covered_tools and tool_name != "bridge":
+            continue
         if tasks_enabled and tool_name == "tasks":
             built_tools.append(TaskBoardTools(tasks_dir=tasks_dir, default_actor=str(team_def.get("name", "team"))))
             continue
         if bridge_enabled and tool_name == "bridge":
-            default_file_base = _resolve_config_path(
-                config,
-                config.get("toolkits", "file", "base_dir", default="workspace"),
-            )
-            default_file_base.mkdir(parents=True, exist_ok=True)
             built_tools.append(
                 BridgeTools(
                     workspace_dir=default_file_base,
@@ -578,6 +606,9 @@ def _build_teams(
 
         team_model = _build_model(config, team_def.get("model_override", {}))
         team_tools = _build_team_tools(config, shared_tools, team_def)
+        default_team_session_summaries = bool(
+            config.get("memory", "enable_session_summaries", default=False)
+        )
 
         extra_instruction_parts: list[str] = []
         if base_instructions:
@@ -605,7 +636,9 @@ def _build_teams(
             num_history_runs=team_def.get("num_history_runs", 6),
             search_session_history=bool(team_def.get("search_session_history", True)),
             num_history_sessions=team_def.get("num_history_sessions", 3),
-            enable_session_summaries=bool(team_def.get("enable_session_summaries", True)),
+            enable_session_summaries=bool(
+                team_def.get("enable_session_summaries", default_team_session_summaries)
+            ),
         )
         registry[name] = team
     return registry

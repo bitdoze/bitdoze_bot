@@ -31,6 +31,14 @@ class TaskBoardToolsTests(unittest.TestCase):
             task = tools.get_task("task-778")["task"]
             self.assertEqual(task["notes"], ["created via string"])
 
+    def test_duplicate_id_is_renamed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = TaskBoardTools(tasks_dir=Path(tmp) / "workspace" / "tasks", default_actor="architect")
+            first = tools.create_task(task_id="task-001", title="One", owner="architect")
+            second = tools.create_task(task_id="task-001", title="Two", owner="architect")
+            self.assertEqual(first["task"]["id"], "task-001")
+            self.assertEqual(second["task"]["id"], "task-002")
+
 
 if __name__ == "__main__":
     unittest.main()

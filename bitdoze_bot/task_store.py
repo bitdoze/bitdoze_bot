@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -127,11 +128,10 @@ class TaskBoardStore:
     ) -> dict[str, Any]:
         with self._locked():
             board = self._read_board_unlocked()
-            if any(task["id"] == task_id for task in board["tasks"]):
-                raise ValueError(f"Task id already exists: {task_id}")
+            resolved_task_id = self._allocate_task_id_unlocked(board=board, requested_id=task_id.strip())
             self._authorize_create(actor=actor, owner=owner)
             task = {
-                "id": task_id.strip(),
+                "id": resolved_task_id,
                 "title": title.strip(),
                 "status": "todo",
                 "owner": owner.strip(),
@@ -145,8 +145,8 @@ class TaskBoardStore:
             self._append_event_unlocked(
                 action="create_task",
                 actor=actor,
-                task_id=task_id,
-                details={"owner": owner, "title": title},
+                task_id=resolved_task_id,
+                details={"owner": owner, "title": title, "requested_id": task_id.strip()},
             )
             return deepcopy(task)
 
@@ -388,6 +388,30 @@ class TaskBoardStore:
             if task["id"] == task_id:
                 return task
         raise ValueError(f"Task not found: {task_id}")
+
+    def _allocate_task_id_unlocked(self, board: dict[str, Any], requested_id: str) -> str:
+        existing_ids = {str(task.get("id", "")).strip() for task in board.get("tasks", []) if task.get("id")}
+        if requested_id not in existing_ids:
+            return requested_id
+
+        numeric_match = re.match(r"^(.*?)(\d+)$", requested_id)
+        if numeric_match:
+            prefix = numeric_match.group(1)
+            number_str = numeric_match.group(2)
+            width = len(number_str)
+            next_number = int(number_str) + 1
+            while True:
+                candidate = f"{prefix}{next_number:0{width}d}"
+                if candidate not in existing_ids:
+                    return candidate
+                next_number += 1
+
+        suffix = 2
+        while True:
+            candidate = f"{requested_id}-{suffix}"
+            if candidate not in existing_ids:
+                return candidate
+            suffix += 1
 
     def _authorize_create(self, *, actor: str, owner: str) -> None:
         if actor == "software-engineer" and owner != "software-engineer":

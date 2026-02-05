@@ -40,10 +40,6 @@ class CollaborationTools(Toolkit):
                 self.write_handoff,
                 self.read_handoff,
                 self.list_handoffs,
-                self.save_file,
-                self.read_file,
-                self.list_files,
-                self.run_shell_command,
             ],
         )
 

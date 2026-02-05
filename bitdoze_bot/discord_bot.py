@@ -8,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, TypedDict, cast
 
 import discord
 from discord.ext import commands, tasks
@@ -36,6 +36,15 @@ from bitdoze_bot.utils import read_text_if_exists
 class DiscordRuntime:
     config: Config
     agents: AgentRegistry
+
+
+class SendableChannel(Protocol):
+    async def send(self, content: str) -> Any: ...
+
+
+class ToolCall(TypedDict):
+    name: str
+    params: dict[str, Any]
 
 
 def _strip_bot_mention(content: str, bot_user_id: int) -> str:
@@ -169,6 +178,9 @@ class DiscordAgentBot(commands.Bot):
         self._cron_watch_loop.start()
 
     async def on_ready(self) -> None:
+        if self.user is None:
+            print("Logged in, but bot user is unavailable.")
+            return
         print(f"Logged in as {self.user} (id: {self.user.id})")
 
     async def on_message(self, message: discord.Message) -> None:
@@ -193,9 +205,19 @@ class DiscordAgentBot(commands.Bot):
 
         agent_hint, content = _parse_agent_hint(content)
         selected_agent = _select_agent_name(self.runtime.config, message, agent_hint)
+        resolved_agent_name = (
+            selected_agent
+            if selected_agent and selected_agent in self.runtime.agents.agents
+            else self.runtime.agents.default_agent
+        )
         agent = self.runtime.agents.get(selected_agent)
+        tool_names = [getattr(tool, "name", type(tool).__name__) for tool in (getattr(agent, "tools", None) or [])]
+        print(f"Agent selected: {resolved_agent_name}; tools: {tool_names}")
 
-        session_id = f"discord:{message.guild.id if message.guild else 'dm'}:{message.channel.id}"
+        session_id = (
+            f"discord:v2:{message.guild.id if message.guild else 'dm'}:"
+            f"{message.channel.id}:{resolved_agent_name}"
+        )
         user_id = f"discord:{message.author.id}"
 
         try:
@@ -234,12 +256,15 @@ class DiscordAgentBot(commands.Bot):
         if channel_id is None:
             return
 
-        channel = self.get_channel(int(channel_id))
-        if channel is None:
+        channel_obj = self.get_channel(int(channel_id))
+        if channel_obj is None:
             try:
-                channel = await self.fetch_channel(int(channel_id))
+                channel_obj = await self.fetch_channel(int(channel_id))
             except Exception:  # noqa: BLE001
                 return
+        channel = _as_sendable_channel(channel_obj)
+        if channel is None:
+            return
 
         agent = self.runtime.agents.get()
         prompt = build_heartbeat_prompt(self.heartbeat_cfg)
@@ -290,12 +315,13 @@ class DiscordAgentBot(commands.Bot):
         channel_id = job.channel_id or self.cron_cfg.default_channel_id
         send_fn = None
         if channel_id is not None:
-            channel = self.get_channel(int(channel_id))
-            if channel is None:
+            channel_obj = self.get_channel(int(channel_id))
+            if channel_obj is None:
                 try:
-                    channel = await self.fetch_channel(int(channel_id))
+                    channel_obj = await self.fetch_channel(int(channel_id))
                 except Exception:  # noqa: BLE001
-                    channel = None
+                    channel_obj = None
+            channel = _as_sendable_channel(channel_obj) if channel_obj is not None else None
             if channel is not None:
                 async def send_fn(content: str) -> None:
                     await _send_chunked(channel, content)
@@ -304,7 +330,15 @@ class DiscordAgentBot(commands.Bot):
         await run_cron_job(agent, job, send_fn)
 
 
-async def _send_chunked(channel: discord.abc.Messageable, content: str) -> None:
+def _as_sendable_channel(channel: object | None) -> SendableChannel | None:
+    if channel is None:
+        return None
+    if not hasattr(channel, "send"):
+        return None
+    return cast(SendableChannel, channel)
+
+
+async def _send_chunked(channel: SendableChannel, content: str) -> None:
     if not content:
         return
     max_len = 1900
@@ -322,14 +356,14 @@ async def _send_chunked(channel: discord.abc.Messageable, content: str) -> None:
         await channel.send(chunk)
 
 
-def _parse_tool_calls(text: str) -> list[dict[str, object]]:
-    calls: list[dict[str, object]] = []
+def _parse_tool_calls(text: str) -> list[ToolCall]:
+    calls: list[ToolCall] = []
     for block in re.findall(r"<tool_call>(.*?)</tool_call>", text, flags=re.DOTALL):
         func_match = re.search(r"<function=([a-zA-Z0-9_]+)>", block)
         if not func_match:
             continue
         func_name = func_match.group(1)
-        params: dict[str, object] = {}
+        params: dict[str, Any] = {}
         for p_match in re.findall(r"<parameter=([a-zA-Z0-9_]+)>(.*?)</parameter>", block, flags=re.DOTALL):
             key = p_match[0]
             value = p_match[1].strip()
@@ -344,12 +378,12 @@ def _parse_tool_calls(text: str) -> list[dict[str, object]]:
     return calls
 
 
-async def _run_tool_calls(agent, calls: list[dict[str, object]]) -> list[dict[str, str]]:
+async def _run_tool_calls(agent: Any, calls: list[ToolCall]) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     tools = getattr(agent, "tools", None) or []
     for call in calls:
-        func_name = call["name"]
-        params = call["params"]
+        func_name: str = call["name"]
+        params: dict[str, Any] = call["params"]
         target = None
         for tool in tools:
             fn = getattr(tool, func_name, None)
