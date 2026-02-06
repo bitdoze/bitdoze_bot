@@ -11,8 +11,6 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-from agno.agent import Agent
-
 from bitdoze_bot.config import Config
 
 
@@ -96,7 +94,7 @@ def build_scheduler() -> AsyncIOScheduler:
 
 
 async def run_cron_job(
-    agent: Agent,
+    agent,
     job: CronJobConfig,
     send_fn: Callable[[str], Awaitable[None]] | None,
 ) -> None:

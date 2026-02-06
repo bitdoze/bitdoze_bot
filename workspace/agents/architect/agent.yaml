@@ -1,0 +1,7 @@
+name: architect
+enabled: true
+model:
+  id: glm-4.7
+  base_url: https://api.z.ai/api/coding/paas/v4
+  api_key_env: GLM_API_KEY
+skills: []

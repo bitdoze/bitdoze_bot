@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+from time import perf_counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -68,6 +69,51 @@ def _build_response_input(user_context: str | None, content: str) -> list[Messag
     return content
 
 
+def _is_team_target(target: Any) -> bool:
+    return hasattr(target, "members")
+
+
+def _target_members(target: Any) -> list[str]:
+    names: list[str] = []
+    for member in getattr(target, "members", None) or []:
+        names.append(_agent_name(member, "unknown"))
+    return names
+
+
+def _extract_metrics(metrics: Any) -> dict[str, Any]:
+    if metrics is None:
+        return {}
+    snapshot: dict[str, Any] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "latency",
+        "time_to_first_token",
+    ):
+        value = getattr(metrics, key, None)
+        if value is not None:
+            snapshot[key] = value
+    return snapshot
+
+
+def _collect_delegation_paths(node: Any, prefix: str = "") -> list[str]:
+    node_name = (
+        getattr(node, "team_name", None)
+        or getattr(node, "agent_name", None)
+        or getattr(node, "name", None)
+        or "unknown"
+    )
+    current = f"{prefix}->{node_name}" if prefix else str(node_name)
+    member_responses = getattr(node, "member_responses", None) or []
+    if not member_responses:
+        return [current]
+    paths: list[str] = []
+    for child in member_responses:
+        paths.extend(_collect_delegation_paths(child, current))
+    return paths
+
+
 async def _run_agent(
     agent,
     content: str,
@@ -76,11 +122,38 @@ async def _run_agent(
     session_id: str,
 ) -> str:
     response_input = _build_response_input(user_context, content)
+    target_name = _agent_name(agent)
+    target_kind = "team" if _is_team_target(agent) else "agent"
+    members = _target_members(agent)
+    logger.info(
+        "Target run started kind=%s name=%s session_id=%s user_id=%s members=%s",
+        target_kind,
+        target_name,
+        session_id,
+        user_id,
+        ", ".join(members) if members else "none",
+    )
+    started_at = perf_counter()
     response = await asyncio.to_thread(
         agent.run,
         response_input,
         user_id=user_id,
         session_id=session_id,
+    )
+    elapsed_ms = int((perf_counter() - started_at) * 1000)
+    run_id = getattr(response, "run_id", None)
+    model = getattr(response, "model", None)
+    metrics = _extract_metrics(getattr(response, "metrics", None))
+    delegation_paths = _collect_delegation_paths(response) if _is_team_target(agent) else []
+    logger.info(
+        "Target run completed kind=%s name=%s run_id=%s model=%s elapsed_ms=%d metrics=%s delegation_paths=%s",
+        target_kind,
+        target_name,
+        run_id,
+        model,
+        elapsed_ms,
+        metrics or {},
+        " | ".join(delegation_paths) if delegation_paths else "n/a",
     )
     return getattr(response, "content", None) or str(response)
 
@@ -261,47 +334,13 @@ class DiscordAgentBot(commands.Bot):
         try:
             async with message.channel.typing():
                 user_context = _build_user_context(self.runtime.config, message)
-                if getattr(agent, "name", None) == "manager":
-                    logger.info("Manager orchestrating architect + engineer")
-                    architect = self.runtime.agents.get("architect")
-                    engineer = self.runtime.agents.get("engineer")
-                    arch_task = _run_agent(
-                        architect,
-                        content,
-                        user_context,
-                        user_id,
-                        session_id + ":architect",
-                    )
-                    eng_task = _run_agent(
-                        engineer,
-                        content,
-                        user_context,
-                        user_id,
-                        session_id + ":engineer",
-                    )
-                    arch_reply, eng_reply = await asyncio.gather(arch_task, eng_task)
-                    manager_prompt = (
-                        "You are the manager. Synthesize the best final response for the user.\n\n"
-                        f"User request:\n{content}\n\n"
-                        f"Architect output:\n{arch_reply}\n\n"
-                        f"Engineer output:\n{eng_reply}\n\n"
-                        "Deliver a concise final answer with clear next steps."
-                    )
-                    reply = await _run_agent(
-                        agent,
-                        manager_prompt,
-                        user_context,
-                        user_id,
-                        session_id + ":manager",
-                    )
-                else:
-                    reply = await _run_agent(
-                        agent,
-                        content,
-                        user_context,
-                        user_id,
-                        session_id,
-                    )
+                reply = await _run_agent(
+                    agent,
+                    content,
+                    user_context,
+                    user_id,
+                    session_id,
+                )
                 if "<tool_call>" in reply:
                     reply = await _handle_toolcall_fallback(agent, reply)
         except Exception as exc:  # noqa: BLE001
@@ -328,7 +367,7 @@ class DiscordAgentBot(commands.Bot):
             except Exception:  # noqa: BLE001
                 return
 
-        logger.info("Active agent for heartbeat: %s", self.runtime.agents.default_agent)
+        logger.info("Active target for heartbeat: %s", self.runtime.agents.default_target)
         agent = self.runtime.agents.get()
         prompt = build_heartbeat_prompt(self.heartbeat_cfg)
 
@@ -389,9 +428,9 @@ class DiscordAgentBot(commands.Bot):
                     await _send_chunked(cast(discord.abc.Messageable, channel), content)
 
         logger.info(
-            "Active agent for cron job '%s': %s",
+            "Active target for cron job '%s': %s",
             job.name,
-            job.agent or self.runtime.agents.default_agent,
+            job.agent or self.runtime.agents.default_target,
         )
         agent = self.runtime.agents.get(job.agent)
         await run_cron_job(agent, job, send_fn)

@@ -87,10 +87,12 @@ context:
 
 agents:
     base_instructions: |
-        You have access to a separate research agent named "research" that is better suited
-        for heavy web research (HackerNews, GitHub, YouTube). If a request requires deep
-        research, route it by asking the user to prefix their message with "research:" or
-        explicitly mentioning "agent:research".
+        You may be orchestrated inside teams. Delegate planning-heavy tasks to architect and
+        implementation-heavy tasks to software-engineer when appropriate.
+    workspace_dir: workspace/agents
+    aliases:
+        engineer: software-engineer
+        software-enginner: software-engineer
     default: main
     definitions:
         - name: main
@@ -108,17 +110,40 @@ agents:
           skills: []
           instructions: ""
         - name: research
-          tools: [web_search, hackernews, website, github, youtube]
+          tools: [web_search, hackernews, website, github, youtube, file, shell]
           skills: [web-research]
           instructions: ""
     routing:
         rules:
+            - agent: delivery-team
+              channel_ids: []
+              user_ids: []
+              guild_ids: []
+              contains: ["manage", "orchestrate", "team:"]
+              starts_with: ["team:"]
             - agent: research
               channel_ids: []
               user_ids: []
               guild_ids: []
               contains: ["research:"]
               starts_with: ["research:"]
+
+teams:
+    definitions:
+        - name: delivery-team
+          members: [architect, software-engineer]
+          respond_directly: true
+          determine_input_for_members: true
+          delegate_to_all_members: false
+          add_member_tools_to_context: true
+          add_team_history_to_members: true
+          num_team_history_runs: 5
+          show_members_responses: false
+          debug_mode: false
+          instructions: |
+              You are the delivery team coordinator.
+              Produce one final answer after collecting architecture and implementation input.
+              Keep output concise, actionable, and include next steps.
 
 skills:
     enabled: true

@@ -4,7 +4,9 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
+
+import yaml
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.learn import (
@@ -18,12 +20,13 @@ from agno.learn import (
     UserProfileConfig,
 )
 from agno.models.openai.like import OpenAILike
-from agno.skills import LocalSkills, Skills, SkillLoader
 from agno.session import SessionSummaryManager
-from agno.tools.github import GithubTools
-from agno.tools.hackernews import HackerNewsTools
+from agno.skills import LocalSkills, SkillLoader, Skills
+from agno.team import Team
 from agno.tools.discord import DiscordTools
 from agno.tools.file import FileTools
+from agno.tools.github import GithubTools
+from agno.tools.hackernews import HackerNewsTools
 from agno.tools.shell import ShellTools
 from agno.tools.websearch import WebSearchTools
 from agno.tools.website import WebsiteTools
@@ -38,12 +41,31 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class AgentRegistry:
     agents: dict[str, Agent]
-    default_agent: str
+    teams: dict[str, Team]
+    default_target: str
+    aliases: dict[str, str]
 
-    def get(self, name: str | None = None) -> Agent:
-        if name and name in self.agents:
-            return self.agents[name]
-        return self.agents[self.default_agent]
+    def _resolve_name(self, name: str | None) -> str | None:
+        if not name:
+            return None
+        return self.aliases.get(name, name)
+
+    def get(self, name: str | None = None) -> Any:
+        resolved = self._resolve_name(name)
+        if resolved:
+            if resolved in self.teams:
+                return self.teams[resolved]
+            if resolved in self.agents:
+                return self.agents[resolved]
+        if self.default_target in self.teams:
+            return self.teams[self.default_target]
+        return self.agents[self.default_target]
+
+    def has(self, name: str) -> bool:
+        resolved = self._resolve_name(name)
+        if not resolved:
+            return False
+        return resolved in self.agents or resolved in self.teams
 
 
 def _require_env(var_name: str) -> str:
@@ -53,10 +75,10 @@ def _require_env(var_name: str) -> str:
     return value
 
 
-def _build_model(config: Config, overrides: dict[str, Any] | None = None) -> OpenAILike:
+def _build_model(config: Config, overrides: Any = None) -> OpenAILike:
     model_cfg = dict(config.get("model", default={}))
-    if overrides:
-        model_cfg.update(overrides)
+    if isinstance(overrides, dict):
+        model_cfg.update(cast(dict[str, Any], overrides))
 
     provider = str(model_cfg.get("provider", "openai_like")).lower()
     if provider not in {"openai_like", "openai-like"}:
@@ -163,11 +185,11 @@ def _build_learning_store(
     )
 
 
-def _build_learning(config: Config, db: SqliteDb, model: OpenAILike, agent_def: dict[str, Any]) -> tuple[Any, bool]:
+def _build_learning(config: Config, db: SqliteDb, model: OpenAILike, cfg: dict[str, Any]) -> tuple[Any, bool]:
     learning_cfg = dict(config.get("learning", default={}) or {})
-    agent_learning_cfg = agent_def.get("learning", {})
-    if isinstance(agent_learning_cfg, dict):
-        learning_cfg.update(agent_learning_cfg)
+    cfg_learning = cfg.get("learning", {})
+    if isinstance(cfg_learning, dict):
+        learning_cfg.update(cfg_learning)
 
     if not learning_cfg or not learning_cfg.get("enabled", False):
         return None, True
@@ -210,6 +232,7 @@ def _build_learning(config: Config, db: SqliteDb, model: OpenAILike, agent_def: 
 def _resolve_instructions(
     config: Config,
     extra: str = "",
+    agent_instructions_path: str | None = None,
 ) -> str:
     instructions_parts: list[str] = []
     base_instructions = config.get("agents", "base_instructions", default="")
@@ -219,17 +242,148 @@ def _resolve_instructions(
     agents_path = config.get("context", "agents_path", default="workspace/AGENTS.md")
     agents_text = read_text_if_exists(agents_path)
     if agents_text:
-        instructions_parts.append("AGENTS:\n" + agents_text)
+        instructions_parts.append("WORKSPACE AGENTS:\n" + agents_text)
 
     soul_path = config.get("soul", "path", default="workspace/SOUL.md")
     soul_text = read_text_if_exists(soul_path)
     if soul_text:
         instructions_parts.append("SOUL:\n" + soul_text)
 
+    if agent_instructions_path:
+        agent_text = read_text_if_exists(agent_instructions_path)
+        if agent_text:
+            instructions_parts.append("AGENT INSTRUCTIONS:\n" + agent_text)
+
     if extra:
         instructions_parts.append(extra)
 
     return "\n\n".join(part for part in instructions_parts if part).strip()
+
+
+def _load_workspace_agent_definitions(config: Config) -> list[dict[str, Any]]:
+    workspace_dir = Path(config.get("agents", "workspace_dir", default="workspace/agents"))
+    if not workspace_dir.exists():
+        return []
+
+    definitions: list[dict[str, Any]] = []
+    for child in sorted(workspace_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        cfg_path = child / "agent.yaml"
+        raw_cfg: dict[str, Any] = {}
+        if cfg_path.exists():
+            loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(loaded, dict):
+                raise ValueError(f"Invalid workspace agent config: {cfg_path}")
+            raw_cfg = dict(loaded)
+
+        if raw_cfg.get("enabled", True) is False:
+            continue
+
+        name = str(raw_cfg.get("name") or child.name)
+        model_cfg = raw_cfg.get("model", {}) or {}
+        if not isinstance(model_cfg, dict):
+            raise ValueError(f"Invalid model config in {cfg_path}")
+
+        definition: dict[str, Any] = {
+            "name": name,
+            "model_override": dict(model_cfg),
+            "tools": raw_cfg.get("tools"),
+            "skills": raw_cfg.get("skills", []),
+            "instructions": raw_cfg.get("instructions", ""),
+            "learning": raw_cfg.get("learning", {}),
+            "workspace": {
+                "path": str(child),
+                "instructions_path": str(child / "AGENTS.md"),
+            },
+        }
+        definitions.append(definition)
+
+    return definitions
+
+
+def _merge_agent_definitions(
+    configured_defs: list[dict[str, Any]],
+    workspace_defs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in configured_defs:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        merged[name] = dict(item)
+    for item in workspace_defs:
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        merged[name] = dict(item)
+    return list(merged.values())
+
+
+def _build_memory_options(
+    config: Config,
+    model: OpenAILike,
+    local_cfg: Any = None,
+) -> dict[str, Any]:
+    memory_cfg = dict(config.get("memory", default={}) or {})
+    if isinstance(local_cfg, dict):
+        memory_cfg.update(cast(dict[str, Any], local_cfg))
+
+    memory_mode = memory_cfg.get("mode", "automatic")
+    add_history = bool(memory_cfg.get("add_history_to_context", True))
+    num_history_runs = memory_cfg.get("num_history_runs")
+    read_chat_history = bool(memory_cfg.get("read_chat_history", True))
+    search_session_history = bool(memory_cfg.get("search_session_history", True))
+    num_history_sessions = memory_cfg.get("num_history_sessions")
+    add_memories = memory_cfg.get("add_memories_to_context")
+    enable_session_summaries = bool(memory_cfg.get("enable_session_summaries", True))
+    add_session_summary = bool(memory_cfg.get("add_session_summary_to_context", True))
+    summary_prompt = memory_cfg.get("summary_prompt")
+    summary_request_message = memory_cfg.get("summary_request_message")
+
+    session_summary_manager = None
+    if enable_session_summaries:
+        session_summary_manager = SessionSummaryManager(
+            model=model,
+            session_summary_prompt=summary_prompt,
+            summary_request_message=summary_request_message
+            or "Return a JSON object with keys summary and topics.",
+        )
+
+    return {
+        "memory_mode": memory_mode,
+        "add_history_to_context": add_history,
+        "num_history_runs": num_history_runs,
+        "read_chat_history": read_chat_history,
+        "search_session_history": search_session_history,
+        "num_history_sessions": num_history_sessions,
+        "add_memories_to_context": add_memories,
+        "enable_session_summaries": enable_session_summaries,
+        "add_session_summary_to_context": add_session_summary,
+        "session_summary_manager": session_summary_manager,
+    }
+
+
+def _coerce_bool(cfg: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in cfg:
+        return default
+    return bool(cfg[key])
+
+
+def _coerce_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return cast(dict[str, Any], value)
+    return {}
+
+
+def _coerce_debug_level(value: Any, default: Literal[1, 2] = 1) -> Literal[1, 2]:
+    if value == 2:
+        return 2
+    if value == 1:
+        return 1
+    return default
 
 
 def build_agents(config: Config) -> AgentRegistry:
@@ -241,21 +395,28 @@ def build_agents(config: Config) -> AgentRegistry:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db = SqliteDb(db_file=str(db_path))
 
+    add_datetime = bool(config.get("context", "add_datetime", default=True))
+    timezone_identifier = config.get("context", "timezone_identifier", default=None)
+
     agents_cfg = config.get("agents", default={})
-    default_agent = agents_cfg.get("default", "main")
-    definitions = agents_cfg.get("definitions", []) or []
+    configured_defs = agents_cfg.get("definitions", []) or []
+    workspace_defs = _load_workspace_agent_definitions(config)
+    definitions = _merge_agent_definitions(configured_defs, workspace_defs)
+
+    if not definitions:
+        default_agent_name = str(agents_cfg.get("default", "main"))
+        definitions = [{"name": default_agent_name}]
 
     registry: dict[str, Agent] = {}
-    if not definitions:
-        definitions = [{"name": default_agent}]
-
     for agent_def in definitions:
-        name = agent_def.get("name", default_agent)
-        model_overrides = agent_def.get("model_override", {})
+        name = str(agent_def.get("name", "")).strip()
+        if not name:
+            continue
+
+        model_overrides: dict[str, Any] = _coerce_mapping(agent_def.get("model_override"))
         model = _build_model(config, model_overrides)
 
         tool_names = agent_def.get("tools")
-
         if tool_names:
             agent_tool_names = [t for t in tool_names if t in tools]
             agent_tools = [tools[t] for t in agent_tool_names]
@@ -263,7 +424,13 @@ def build_agents(config: Config) -> AgentRegistry:
             agent_tool_names = list(tools.keys())
             agent_tools = list(tools.values())
 
-        instructions = _resolve_instructions(config, agent_def.get("instructions", ""))
+        workspace_cfg: dict[str, Any] = _coerce_mapping(agent_def.get("workspace"))
+        agent_instructions_path = workspace_cfg.get("instructions_path")
+        instructions = _resolve_instructions(
+            config,
+            agent_def.get("instructions", ""),
+            agent_instructions_path=agent_instructions_path,
+        )
 
         skills_cfg = config.get("skills", default={})
         skills_enabled = bool(skills_cfg.get("enabled", False))
@@ -284,28 +451,9 @@ def build_agents(config: Config) -> AgentRegistry:
                         loaders.append(LocalSkills(str(base_dir)))
             if loaders:
                 skills_loader = Skills(loaders=loaders)
-        memory_mode = memory_cfg.get("mode", "automatic")
-        add_history = bool(memory_cfg.get("add_history_to_context", True))
-        num_history_runs = memory_cfg.get("num_history_runs")
-        read_chat_history = bool(memory_cfg.get("read_chat_history", True))
-        search_session_history = bool(memory_cfg.get("search_session_history", True))
-        num_history_sessions = memory_cfg.get("num_history_sessions")
-        add_memories = memory_cfg.get("add_memories_to_context")
-        enable_session_summaries = bool(memory_cfg.get("enable_session_summaries", True))
-        add_session_summary = bool(memory_cfg.get("add_session_summary_to_context", True))
-        summary_prompt = memory_cfg.get("summary_prompt")
-        summary_request_message = memory_cfg.get("summary_request_message")
-        add_datetime = bool(config.get("context", "add_datetime", default=True))
-        timezone_identifier = config.get("context", "timezone_identifier", default=None)
 
-        session_summary_manager = None
-        if enable_session_summaries:
-            session_summary_manager = SessionSummaryManager(
-                model=model,
-                session_summary_prompt=summary_prompt,
-                summary_request_message=summary_request_message
-                or "Return a JSON object with keys summary and topics.",
-            )
+        agent_memory_cfg: dict[str, Any] = _coerce_mapping(agent_def.get("memory"))
+        mem_options = _build_memory_options(config, model, agent_memory_cfg)
         learning, add_learnings_to_context = _build_learning(config, db, model, agent_def)
 
         agent = Agent(
@@ -315,28 +463,121 @@ def build_agents(config: Config) -> AgentRegistry:
             instructions=instructions or None,
             db=db,
             markdown=True,
-            update_memory_on_run=(memory_mode == "automatic"),
-            enable_agentic_memory=(memory_mode == "agentic"),
-            add_memories_to_context=add_memories,
-            add_history_to_context=add_history,
-            num_history_runs=num_history_runs,
-            read_chat_history=read_chat_history,
-            search_session_history=search_session_history,
-            num_history_sessions=num_history_sessions,
-            enable_session_summaries=enable_session_summaries,
-            add_session_summary_to_context=add_session_summary,
-            session_summary_manager=session_summary_manager,
+            update_memory_on_run=(mem_options["memory_mode"] == "automatic"),
+            enable_agentic_memory=(mem_options["memory_mode"] == "agentic"),
+            add_memories_to_context=mem_options["add_memories_to_context"],
+            add_history_to_context=mem_options["add_history_to_context"],
+            num_history_runs=mem_options["num_history_runs"],
+            read_chat_history=mem_options["read_chat_history"],
+            search_session_history=mem_options["search_session_history"],
+            num_history_sessions=mem_options["num_history_sessions"],
+            enable_session_summaries=mem_options["enable_session_summaries"],
+            add_session_summary_to_context=mem_options["add_session_summary_to_context"],
+            session_summary_manager=mem_options["session_summary_manager"],
             add_datetime_to_context=add_datetime,
             timezone_identifier=timezone_identifier,
             skills=skills_loader,
             learning=learning,
             add_learnings_to_context=add_learnings_to_context,
+            metadata={"workspace": workspace_cfg.get("path")} if workspace_cfg else None,
         )
         registry[name] = agent
         logger.info("Agent '%s' tools: %s", name, ", ".join(agent_tool_names) or "none")
 
-    if default_agent not in registry:
-        default_agent = next(iter(registry.keys()))
+    teams_cfg = config.get("teams", default={}) or {}
+    team_definitions = teams_cfg.get("definitions", []) or []
+    team_registry: dict[str, Team] = {}
 
-    logger.info("Default agent: %s", default_agent)
-    return AgentRegistry(agents=registry, default_agent=default_agent)
+    for team_def in team_definitions:
+        if not isinstance(team_def, dict):
+            continue
+        team_name = str(team_def.get("name", "")).strip()
+        if not team_name:
+            continue
+        member_names = [str(m).strip() for m in (team_def.get("members") or []) if str(m).strip()]
+        if not member_names:
+            raise ValueError(f"Team '{team_name}' has no members")
+
+        members: list[Any] = []
+        for member_name in member_names:
+            if member_name in registry:
+                members.append(registry[member_name])
+                continue
+            if member_name in team_registry:
+                members.append(team_registry[member_name])
+                continue
+            raise ValueError(f"Team '{team_name}' member '{member_name}' not found")
+
+        team_model_override: dict[str, Any] = _coerce_mapping(team_def.get("model_override"))
+        model = _build_model(config, team_model_override)
+        team_memory_cfg: dict[str, Any] = _coerce_mapping(team_def.get("memory"))
+        mem_options = _build_memory_options(config, model, team_memory_cfg)
+        team_tool_names = team_def.get("tools")
+        if team_tool_names:
+            selected_team_tool_names = [t for t in team_tool_names if t in tools]
+            team_tools = [tools[t] for t in selected_team_tool_names]
+        else:
+            selected_team_tool_names = list(tools.keys())
+            team_tools = list(tools.values())
+
+        instructions = _resolve_instructions(config, team_def.get("instructions", ""))
+
+        team = Team(
+            name=team_name,
+            model=model,
+            members=members,
+            tools=team_tools,
+            instructions=instructions or None,
+            respond_directly=_coerce_bool(team_def, "respond_directly", True),
+            determine_input_for_members=_coerce_bool(team_def, "determine_input_for_members", True),
+            delegate_to_all_members=_coerce_bool(team_def, "delegate_to_all_members", False),
+            share_member_interactions=_coerce_bool(team_def, "share_member_interactions", False),
+            show_members_responses=_coerce_bool(team_def, "show_members_responses", False),
+            add_member_tools_to_context=_coerce_bool(team_def, "add_member_tools_to_context", True),
+            add_team_history_to_members=_coerce_bool(team_def, "add_team_history_to_members", True),
+            num_team_history_runs=int(team_def.get("num_team_history_runs", 3)),
+            db=db,
+            markdown=True,
+            update_memory_on_run=(mem_options["memory_mode"] == "automatic"),
+            enable_agentic_memory=(mem_options["memory_mode"] == "agentic"),
+            add_memories_to_context=mem_options["add_memories_to_context"],
+            add_history_to_context=mem_options["add_history_to_context"],
+            num_history_runs=mem_options["num_history_runs"],
+            read_chat_history=mem_options["read_chat_history"],
+            search_session_history=mem_options["search_session_history"],
+            num_history_sessions=mem_options["num_history_sessions"],
+            enable_session_summaries=mem_options["enable_session_summaries"],
+            add_session_summary_to_context=mem_options["add_session_summary_to_context"],
+            session_summary_manager=mem_options["session_summary_manager"],
+            add_datetime_to_context=add_datetime,
+            timezone_identifier=timezone_identifier,
+            stream_member_events=_coerce_bool(team_def, "stream_member_events", True),
+            debug_mode=_coerce_bool(team_def, "debug_mode", False),
+            debug_level=_coerce_debug_level(team_def.get("debug_level")),
+        )
+        team_registry[team_name] = team
+        logger.info(
+            "Team '%s' members: %s | tools: %s",
+            team_name,
+            ", ".join(member_names),
+            ", ".join(selected_team_tool_names) or "none",
+        )
+
+    aliases = dict(agents_cfg.get("aliases", {}) or {})
+    default_target = str(teams_cfg.get("default") or agents_cfg.get("default", "main"))
+    if default_target in aliases:
+        default_target = aliases[default_target]
+
+    if default_target not in registry and default_target not in team_registry:
+        if team_registry:
+            default_target = next(iter(team_registry.keys()))
+        else:
+            default_target = next(iter(registry.keys()))
+
+    logger.info("Default target: %s", default_target)
+    return AgentRegistry(
+        agents=registry,
+        teams=team_registry,
+        default_target=default_target,
+        aliases=aliases,
+    )

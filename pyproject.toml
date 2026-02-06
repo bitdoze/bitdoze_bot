@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "agno",
+    "pytest",
     "beautifulsoup4",
     "ddgs",
     "discord-py",

@@ -5,7 +5,10 @@ A Discord-first agent powered by Agno, with Web Search, Website Scraping, Local 
 ## Features
 - **Agno toolkits**: WebSearchTools, WebsiteTools, FileTools, DiscordTools
 - **Agno toolkits**: WebSearchTools, HackerNewsTools, WebsiteTools, GithubTools, YouTubeTools, FileTools, ShellTools, DiscordTools
+- **Agno Teams**: native team orchestration with delegation options
+- **Team observability**: logs selected members, delegation paths, run timing, and metrics
 - **Memory**: SQLite-backed, automatic memory updates by default
+- **Learning**: Agno LearningMachine per member agent (user profile + memory stores)
 - **Soul + Heartbeat**: persona via `workspace/SOUL.md`, heartbeat checks via `workspace/HEARTBEAT.md`
 - **Mention-first**: respond when tagged with `@Bot`
 - **Extensible**: add more agents and future skills in config
@@ -48,6 +51,8 @@ Edit `config.yaml`:
 - `memory`: `mode: automatic` (best capture), SQLite db path, history + summaries (custom prompt supported)
 - `learning`: enable Agno LearningMachine and set learning modes (`always`, `agentic`, `propose`, `hitl`)
 - `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, discord tools
+- `agents.workspace_dir`: folder-based agent loading from `workspace/agents/<name>/`
+- `teams`: native Agno Team definitions, delegation behavior, team memory options, and default team
 - `heartbeat`: 30-min cadence, optional channel override
 - `cron`: schedule jobs via `workspace/CRON.yaml`
 - `agents`: define multiple agents, per-agent tool selections, and routing rules
@@ -90,6 +95,86 @@ agents:
 Rules match on `channel_ids`, `user_ids`, `guild_ids`, `contains`, and `starts_with`.
 All specified conditions in a rule must match.
 
+## Workspace Agents
+Agents can be added without code changes using:
+
+- `workspace/agents/<agent-name>/agent.yaml`
+- `workspace/agents/<agent-name>/AGENTS.md`
+
+Example `agent.yaml`:
+
+```yaml
+name: software-engineer
+enabled: true
+model:
+  id: glm-4.7
+  base_url: https://api.z.ai/api/coding/paas/v4
+  api_key_env: GLM_API_KEY
+tools: [web_search, website, github, file, shell]
+skills: []
+```
+
+Folder agents are merged with config-defined agents by name. If names collide, folder definitions win.
+
+## Teams
+Example:
+
+```yaml
+teams:
+  default: delivery-team
+  definitions:
+    - name: delivery-team
+      members: [architect, software-engineer]
+      respond_directly: true
+      determine_input_for_members: true
+      delegate_to_all_members: true
+      add_team_history_to_members: true
+      num_team_history_runs: 5
+```
+
+The team and members share the configured SQLite DB. Team memory/history is handled by Agno Team settings, while member learning is handled by each member's LearningMachine config.
+
+## Team Debugging
+- Each team/agent run logs:
+  - target kind (`agent` or `team`) and target name
+  - selected team members
+  - elapsed runtime
+  - run id + model
+  - token/latency metrics when provided by Agno
+  - delegation paths extracted from `member_responses`
+
+## How It Works
+Runtime flow:
+- On startup, the bot loads `config.yaml`, then builds global toolkits from `toolkits`.
+- It loads agents from:
+  - `agents.definitions` in config
+  - `workspace/agents/<name>/agent.yaml` (folder-based agents)
+- For folder-based agents, `workspace/agents/<name>/AGENTS.md` is added to that agent's instructions.
+- It builds Agno `Agent` members (with memory + learning), then Agno `Team` objects from `teams.definitions`.
+- The runtime registry can resolve both agents and teams by name, including aliases.
+
+Message handling:
+- Discord message arrives -> routing rules in `agents.routing.rules` choose a target name.
+- The target can be either a single agent or a team.
+- The bot calls `.run(...)` on the selected target.
+- If target is a team, Agno handles delegation and synthesis natively.
+
+Memory and learning:
+- Shared DB: `memory.db_file` (SQLite).
+- Member learning: configured via `learning` (LearningMachine stores like `user_profile`, `user_memory`).
+- Team memory/history: configured in `teams.definitions[]` via options such as:
+  - `add_team_history_to_members`
+  - `num_team_history_runs`
+  - `add_history_to_context`
+  - session summary settings inherited from memory config.
+
+Add a new teammate:
+1. Create folder: `workspace/agents/<new-agent>/`
+2. Add `agent.yaml` with model settings (`id`, `base_url`, `api_key_env`)
+3. Add `AGENTS.md` with role-specific instructions
+4. Add the agent name to `teams.definitions[].members` in `config.yaml`
+5. Restart the bot
+
 ## Skills Format (Agno)
 Skills follow Agno's skill structure (see Agno docs). Each skill lives in its own folder
 under `skills/` with a `SKILL.md` that includes YAML frontmatter (name/description).
@@ -125,3 +210,16 @@ jobs:
     deliver: true
     session_scope: isolated
 ```
+
+## Tests
+Run:
+
+```bash
+uv run pytest -q
+```
+
+Current coverage includes:
+- workspace agent loading + team registry wiring
+- alias resolution
+- routing rule selection
+- delegation path extraction helper
