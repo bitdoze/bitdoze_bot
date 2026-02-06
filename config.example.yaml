@@ -68,6 +68,8 @@ heartbeat:
     interval_minutes: 30
     quiet_ack: HEARTBEAT_OK
     prompt_path: workspace/HEARTBEAT.md
+    session_scope: isolated # isolated | shared
+    agent: null # optional: run heartbeat with a dedicated low-context agent
     channel_id: null
 
 cron:

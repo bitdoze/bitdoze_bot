@@ -367,14 +367,22 @@ class DiscordAgentBot(commands.Bot):
             except Exception:  # noqa: BLE001
                 return
 
-        logger.info("Active target for heartbeat: %s", self.runtime.agents.default_target)
-        agent = self.runtime.agents.get()
+        target_name = self.heartbeat_cfg.agent
+        resolved_target = target_name or self.runtime.agents.default_target
+        logger.info("Active target for heartbeat: %s", resolved_target)
+        agent = self.runtime.agents.get(target_name)
         prompt = build_heartbeat_prompt(self.heartbeat_cfg)
 
         async def send_fn(content: str) -> None:
             await _send_chunked(cast(discord.abc.Messageable, channel), content)
 
-        await run_heartbeat(agent, prompt, self.heartbeat_cfg.quiet_ack, send_fn)
+        await run_heartbeat(
+            agent,
+            prompt,
+            self.heartbeat_cfg.quiet_ack,
+            send_fn,
+            session_scope=self.heartbeat_cfg.session_scope,
+        )
 
     def _configure_cron_jobs(self) -> None:
         if not self.cron_cfg.jobs:

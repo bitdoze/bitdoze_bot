@@ -7,6 +7,7 @@ A Discord-first agent powered by Agno, with Web Search, Website Scraping, Local 
 - **Agno toolkits**: WebSearchTools, HackerNewsTools, WebsiteTools, GithubTools, YouTubeTools, FileTools, ShellTools, DiscordTools
 - **Agno Teams**: native team orchestration with delegation options
 - **Team observability**: logs selected members, delegation paths, run timing, and metrics
+- **Persistent logging**: stdout + rotating file logs at `logs/bitdoze-bot.log` (10MB x 5 backups)
 - **Memory**: SQLite-backed, automatic memory updates by default
 - **Learning**: Agno LearningMachine per member agent (user profile + memory stores)
 - **Soul + Heartbeat**: persona via `workspace/SOUL.md`, heartbeat checks via `workspace/HEARTBEAT.md`
@@ -53,7 +54,7 @@ Edit `config.yaml`:
 - `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, discord tools
 - `agents.workspace_dir`: folder-based agent loading from `workspace/agents/<name>/`
 - `teams`: native Agno Team definitions, delegation behavior, team memory options, and default team
-- `heartbeat`: 30-min cadence, optional channel override
+- `heartbeat`: 30-min cadence, optional channel override, `session_scope` (`isolated` to avoid heartbeat history growth), and optional dedicated `agent`
 - `cron`: schedule jobs via `workspace/CRON.yaml`
 - `agents`: define multiple agents, per-agent tool selections, and routing rules
 - `skills`: optional skill packs loaded from `skills/`
@@ -143,6 +144,16 @@ The team and members share the configured SQLite DB. Team memory/history is hand
   - token/latency metrics when provided by Agno
   - delegation paths extracted from `member_responses`
 
+## Logging
+- The bot logs to both stdout and `logs/bitdoze-bot.log`.
+- File logs rotate automatically (`10MB`, `5` backups).
+- `logs/` is git-ignored.
+- Live tail:
+
+```bash
+tail -f logs/bitdoze-bot.log
+```
+
 ## How It Works
 Runtime flow:
 - On startup, the bot loads `config.yaml`, then builds global toolkits from `toolkits`.
@@ -193,6 +204,7 @@ Skill names must be lowercase and use hyphens, and must match the folder name.
 
 ## Notes
 - **Heartbeat** sends a proactive update every 30 minutes. If it returns `HEARTBEAT_OK`, the message is suppressed.
+- For lower token usage, keep `heartbeat.session_scope: isolated` and optionally point `heartbeat.agent` to a lightweight agent with minimal tools/memory.
 - **FileTools** is sandboxed to `workspace/` by default.
 
 ## Cron Jobs
