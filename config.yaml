@@ -69,7 +69,7 @@ heartbeat:
     quiet_ack: HEARTBEAT_OK
     prompt_path: workspace/HEARTBEAT.md
     session_scope: isolated # isolated | shared
-    agent: null # optional: run heartbeat with a dedicated low-context agent
+    agent: heartbeat # optional: run heartbeat with a dedicated low-context agent
     channel_id: null
 
 cron:
@@ -115,6 +115,25 @@ agents:
           tools: [web_search, hackernews, website, github, youtube, file, shell]
           skills: [web-research]
           instructions: ""
+        - name: heartbeat
+          tools: []
+          skills: []
+          memory:
+              mode: disabled
+              add_history_to_context: false
+              read_chat_history: false
+              search_session_history: false
+              num_history_sessions: 0
+              add_memories_to_context: false
+              enable_session_summaries: false
+              add_session_summary_to_context: false
+          learning:
+              enabled: false
+          instructions: |
+              You are a lightweight heartbeat monitor.
+              Never call tools for heartbeat checks.
+              If there is nothing to report, respond exactly: HEARTBEAT_OK
+              If there is something to report, respond in 1-3 short bullets.
     routing:
         rules:
             - agent: delivery-team

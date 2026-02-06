@@ -205,6 +205,7 @@ Skill names must be lowercase and use hyphens, and must match the folder name.
 ## Notes
 - **Heartbeat** sends a proactive update every 30 minutes. If it returns `HEARTBEAT_OK`, the message is suppressed.
 - For lower token usage, keep `heartbeat.session_scope: isolated` and optionally point `heartbeat.agent` to a lightweight agent with minimal tools/memory.
+- `tools: []` on an agent/team now means "no tools" (explicitly empty), not "all tools".
 - **FileTools** is sandboxed to `workspace/` by default.
 
 ## Cron Jobs

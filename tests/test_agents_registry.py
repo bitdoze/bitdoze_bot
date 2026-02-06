@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agno.tools.hackernews import HackerNewsTools
+
 from bitdoze_bot.agents import build_agents
 from bitdoze_bot.config import load_config
 
@@ -114,3 +116,138 @@ teams:
 
     resolved = registry.get("software-enginner")
     assert getattr(resolved, "name", None) == "software-engineer"
+
+
+def test_build_agents_explicit_empty_tools(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TEST_MODEL_KEY", "test-key")
+
+    config_path = tmp_path / "config.yaml"
+    db_file = tmp_path / "data" / "bot.db"
+    config_path.write_text(
+        f"""
+model:
+  provider: openai_like
+  id: test-model
+  base_url: https://example.test/v1
+  api_key_env: TEST_MODEL_KEY
+  structured_outputs: off
+
+memory:
+  db_file: {db_file}
+  mode: automatic
+  add_history_to_context: false
+  read_chat_history: false
+  search_session_history: false
+  add_memories_to_context: false
+  enable_session_summaries: false
+  add_session_summary_to_context: false
+
+learning:
+  enabled: false
+
+toolkits:
+  web_search: {{ enabled: false }}
+  hackernews: {{ enabled: false }}
+  website: {{ enabled: false }}
+  github: {{ enabled: false }}
+  youtube: {{ enabled: false }}
+  file: {{ enabled: false }}
+  shell: {{ enabled: false }}
+  discord: {{ enabled: false }}
+
+context:
+  add_datetime: false
+
+skills:
+  enabled: false
+
+agents:
+  workspace_dir: {tmp_path / "workspace" / "agents"}
+  definitions:
+    - name: heartbeat
+      tools: []
+  default: heartbeat
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = build_agents(load_config(config_path))
+    heartbeat = registry.get("heartbeat")
+    assert getattr(heartbeat, "name", None) == "heartbeat"
+    assert getattr(heartbeat, "tools", None) == []
+
+
+def test_workspace_agent_missing_tools_uses_default_toolset(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TEST_MODEL_KEY", "test-key")
+
+    workspace_dir = tmp_path / "workspace" / "agents"
+    _write(
+        workspace_dir / "architect" / "agent.yaml",
+        """
+name: architect
+model:
+  id: test-model
+  base_url: https://example.test/v1
+  api_key_env: TEST_MODEL_KEY
+skills: []
+""".strip(),
+    )
+    _write(
+        workspace_dir / "architect" / "AGENTS.md",
+        "Architect instructions",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    db_file = tmp_path / "data" / "bot.db"
+    config_path.write_text(
+        f"""
+model:
+  provider: openai_like
+  id: test-model
+  base_url: https://example.test/v1
+  api_key_env: TEST_MODEL_KEY
+  structured_outputs: off
+
+memory:
+  db_file: {db_file}
+  mode: automatic
+  add_history_to_context: false
+  read_chat_history: false
+  search_session_history: false
+  add_memories_to_context: false
+  enable_session_summaries: false
+  add_session_summary_to_context: false
+
+learning:
+  enabled: false
+
+toolkits:
+  web_search: {{ enabled: false }}
+  hackernews: {{ enabled: true }}
+  website: {{ enabled: false }}
+  github: {{ enabled: false }}
+  youtube: {{ enabled: false }}
+  file: {{ enabled: false }}
+  shell: {{ enabled: false }}
+  discord: {{ enabled: false }}
+
+context:
+  add_datetime: false
+
+skills:
+  enabled: false
+
+agents:
+  workspace_dir: {workspace_dir}
+  definitions:
+    - name: main
+  default: architect
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = build_agents(load_config(config_path))
+    architect = registry.get("architect")
+    tools = getattr(architect, "tools", None) or []
+    assert len(tools) == 1
+    assert isinstance(tools[0], HackerNewsTools)

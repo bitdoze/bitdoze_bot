@@ -416,8 +416,9 @@ def build_agents(config: Config) -> AgentRegistry:
         model_overrides: dict[str, Any] = _coerce_mapping(agent_def.get("model_override"))
         model = _build_model(config, model_overrides)
 
-        tool_names = agent_def.get("tools")
-        if tool_names:
+        explicit_agent_tools = "tools" in agent_def and agent_def.get("tools") is not None
+        if explicit_agent_tools:
+            tool_names = list(agent_def.get("tools") or [])
             agent_tool_names = [t for t in tool_names if t in tools]
             agent_tools = [tools[t] for t in agent_tool_names]
         else:
@@ -512,8 +513,9 @@ def build_agents(config: Config) -> AgentRegistry:
         model = _build_model(config, team_model_override)
         team_memory_cfg: dict[str, Any] = _coerce_mapping(team_def.get("memory"))
         mem_options = _build_memory_options(config, model, team_memory_cfg)
-        team_tool_names = team_def.get("tools")
-        if team_tool_names:
+        explicit_team_tools = "tools" in team_def and team_def.get("tools") is not None
+        if explicit_team_tools:
+            team_tool_names = list(team_def.get("tools") or [])
             selected_team_tool_names = [t for t in team_tool_names if t in tools]
             team_tools = [tools[t] for t in selected_team_tool_names]
         else:
