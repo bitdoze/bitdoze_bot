@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from datetime import datetime, timedelta
@@ -8,7 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import discord
 from discord.ext import commands, tasks
@@ -30,6 +31,8 @@ from bitdoze_bot.heartbeat import (
     run_heartbeat,
 )
 from bitdoze_bot.utils import read_text_if_exists
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,6 +57,38 @@ def _parse_agent_hint(content: str) -> tuple[str | None, str]:
             message_part = parts[1] if len(parts) > 1 else ""
             return agent_part or None, message_part.strip()
     return None, content
+
+
+def _build_response_input(user_context: str | None, content: str) -> list[Message] | str:
+    if user_context:
+        return [
+            Message(role="system", content=user_context),
+            Message(role="user", content=content),
+        ]
+    return content
+
+
+async def _run_agent(
+    agent,
+    content: str,
+    user_context: str | None,
+    user_id: str,
+    session_id: str,
+) -> str:
+    response_input = _build_response_input(user_context, content)
+    response = await asyncio.to_thread(
+        agent.run,
+        response_input,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    return getattr(response, "content", None) or str(response)
+
+
+def _agent_name(agent: Any, fallback: str | None = None) -> str:
+    if hasattr(agent, "name"):
+        return str(getattr(agent, "name"))
+    return fallback or "unknown"
 
 
 def _match_rule(rule: dict[str, Any], message: discord.Message) -> bool:
@@ -169,7 +204,11 @@ class DiscordAgentBot(commands.Bot):
         self._cron_watch_loop.start()
 
     async def on_ready(self) -> None:
-        print(f"Logged in as {self.user} (id: {self.user.id})")
+        user = self.user
+        if user is not None:
+            print(f"Logged in as {user} (id: {user.id})")
+        else:
+            print("Logged in (user not available yet)")
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -194,6 +233,27 @@ class DiscordAgentBot(commands.Bot):
         agent_hint, content = _parse_agent_hint(content)
         selected_agent = _select_agent_name(self.runtime.config, message, agent_hint)
         agent = self.runtime.agents.get(selected_agent)
+        agent_name = _agent_name(agent, selected_agent)
+        logger.info(
+            "Active agent for message (guild=%s channel=%s user=%s): %s",
+            message.guild.id if message.guild else "dm",
+            message.channel.id,
+            message.author.id,
+            agent_name,
+        )
+        tools = getattr(agent, "tools", None) or []
+        for tool in tools:
+            tool_name = getattr(tool, "name", tool.__class__.__name__)
+            if hasattr(tool, "get_functions"):
+                tool_functions = sorted(tool.get_functions().keys())
+            else:
+                tool_functions = []
+            logger.info(
+                "Agent %s toolkit %s functions: %s",
+                agent_name,
+                tool_name,
+                ", ".join(tool_functions) or "none",
+            )
 
         session_id = f"discord:{message.guild.id if message.guild else 'dm'}:{message.channel.id}"
         user_id = f"discord:{message.author.id}"
@@ -201,22 +261,49 @@ class DiscordAgentBot(commands.Bot):
         try:
             async with message.channel.typing():
                 user_context = _build_user_context(self.runtime.config, message)
-                if user_context:
-                    response_input = [
-                        Message(role="system", content=user_context),
-                        Message(role="user", content=content),
-                    ]
+                if getattr(agent, "name", None) == "manager":
+                    logger.info("Manager orchestrating architect + engineer")
+                    architect = self.runtime.agents.get("architect")
+                    engineer = self.runtime.agents.get("engineer")
+                    arch_task = _run_agent(
+                        architect,
+                        content,
+                        user_context,
+                        user_id,
+                        session_id + ":architect",
+                    )
+                    eng_task = _run_agent(
+                        engineer,
+                        content,
+                        user_context,
+                        user_id,
+                        session_id + ":engineer",
+                    )
+                    arch_reply, eng_reply = await asyncio.gather(arch_task, eng_task)
+                    manager_prompt = (
+                        "You are the manager. Synthesize the best final response for the user.\n\n"
+                        f"User request:\n{content}\n\n"
+                        f"Architect output:\n{arch_reply}\n\n"
+                        f"Engineer output:\n{eng_reply}\n\n"
+                        "Deliver a concise final answer with clear next steps."
+                    )
+                    reply = await _run_agent(
+                        agent,
+                        manager_prompt,
+                        user_context,
+                        user_id,
+                        session_id + ":manager",
+                    )
                 else:
-                    response_input = content
-                response = await asyncio.to_thread(
-                    agent.run,
-                    response_input,
-                    user_id=user_id,
-                    session_id=session_id,
-                )
-            reply = getattr(response, "content", None) or str(response)
-            if "<tool_call>" in reply:
-                reply = await _handle_toolcall_fallback(agent, reply)
+                    reply = await _run_agent(
+                        agent,
+                        content,
+                        user_context,
+                        user_id,
+                        session_id,
+                    )
+                if "<tool_call>" in reply:
+                    reply = await _handle_toolcall_fallback(agent, reply)
         except Exception as exc:  # noqa: BLE001
             await message.channel.send(f"Error: {exc}")
             return
@@ -241,11 +328,12 @@ class DiscordAgentBot(commands.Bot):
             except Exception:  # noqa: BLE001
                 return
 
+        logger.info("Active agent for heartbeat: %s", self.runtime.agents.default_agent)
         agent = self.runtime.agents.get()
         prompt = build_heartbeat_prompt(self.heartbeat_cfg)
 
         async def send_fn(content: str) -> None:
-            await _send_chunked(channel, content)
+            await _send_chunked(cast(discord.abc.Messageable, channel), content)
 
         await run_heartbeat(agent, prompt, self.heartbeat_cfg.quiet_ack, send_fn)
 
@@ -298,8 +386,13 @@ class DiscordAgentBot(commands.Bot):
                     channel = None
             if channel is not None:
                 async def send_fn(content: str) -> None:
-                    await _send_chunked(channel, content)
+                    await _send_chunked(cast(discord.abc.Messageable, channel), content)
 
+        logger.info(
+            "Active agent for cron job '%s': %s",
+            job.name,
+            job.agent or self.runtime.agents.default_agent,
+        )
         agent = self.runtime.agents.get(job.agent)
         await run_cron_job(agent, job, send_fn)
 
@@ -322,14 +415,14 @@ async def _send_chunked(channel: discord.abc.Messageable, content: str) -> None:
         await channel.send(chunk)
 
 
-def _parse_tool_calls(text: str) -> list[dict[str, object]]:
-    calls: list[dict[str, object]] = []
+def _parse_tool_calls(text: str) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
     for block in re.findall(r"<tool_call>(.*?)</tool_call>", text, flags=re.DOTALL):
         func_match = re.search(r"<function=([a-zA-Z0-9_]+)>", block)
         if not func_match:
             continue
         func_name = func_match.group(1)
-        params: dict[str, object] = {}
+        params: dict[str, Any] = {}
         for p_match in re.findall(r"<parameter=([a-zA-Z0-9_]+)>(.*?)</parameter>", block, flags=re.DOTALL):
             key = p_match[0]
             value = p_match[1].strip()
@@ -344,12 +437,12 @@ def _parse_tool_calls(text: str) -> list[dict[str, object]]:
     return calls
 
 
-async def _run_tool_calls(agent, calls: list[dict[str, object]]) -> list[dict[str, str]]:
+async def _run_tool_calls(agent, calls: list[dict[str, Any]]) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     tools = getattr(agent, "tools", None) or []
     for call in calls:
-        func_name = call["name"]
-        params = call["params"]
+        func_name = str(call.get("name", ""))
+        params = cast(dict[str, Any], call.get("params", {}))
         target = None
         for tool in tools:
             fn = getattr(tool, func_name, None)
@@ -357,6 +450,7 @@ async def _run_tool_calls(agent, calls: list[dict[str, object]]) -> list[dict[st
                 target = fn
                 break
         if target is None:
+            logger.error("Tool function not found: %s", func_name)
             continue
         output = await asyncio.to_thread(target, **params)
         results.append({"name": func_name, "output": str(output)})

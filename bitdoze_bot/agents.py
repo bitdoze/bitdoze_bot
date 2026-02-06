@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,7 @@ from agno.learn import (
     UserProfileConfig,
 )
 from agno.models.openai.like import OpenAILike
-from agno.skills import LocalSkills, Skills
+from agno.skills import LocalSkills, Skills, SkillLoader
 from agno.session import SessionSummaryManager
 from agno.tools.github import GithubTools
 from agno.tools.hackernews import HackerNewsTools
@@ -30,6 +31,8 @@ from agno.tools.youtube import YouTubeTools
 
 from bitdoze_bot.config import Config
 from bitdoze_bot.utils import read_text_if_exists
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -254,8 +257,10 @@ def build_agents(config: Config) -> AgentRegistry:
         tool_names = agent_def.get("tools")
 
         if tool_names:
-            agent_tools = [tools[t] for t in tool_names if t in tools]
+            agent_tool_names = [t for t in tool_names if t in tools]
+            agent_tools = [tools[t] for t in agent_tool_names]
         else:
+            agent_tool_names = list(tools.keys())
             agent_tools = list(tools.values())
 
         instructions = _resolve_instructions(config, agent_def.get("instructions", ""))
@@ -266,7 +271,7 @@ def build_agents(config: Config) -> AgentRegistry:
         if skills_enabled:
             base_dirs = [Path(p) for p in skills_cfg.get("directories", [])]
             skill_names = list(agent_def.get("skills", []) or [])
-            loaders: list[LocalSkills] = []
+            loaders: list[SkillLoader] = []
             if skill_names:
                 for base_dir in base_dirs:
                     for skill_name in skill_names:
@@ -328,8 +333,10 @@ def build_agents(config: Config) -> AgentRegistry:
             add_learnings_to_context=add_learnings_to_context,
         )
         registry[name] = agent
+        logger.info("Agent '%s' tools: %s", name, ", ".join(agent_tool_names) or "none")
 
     if default_agent not in registry:
         default_agent = next(iter(registry.keys()))
 
+    logger.info("Default agent: %s", default_agent)
     return AgentRegistry(agents=registry, default_agent=default_agent)

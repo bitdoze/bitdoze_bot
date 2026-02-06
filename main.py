@@ -1,4 +1,5 @@
 import argparse
+import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -7,6 +8,10 @@ from bitdoze_bot.discord_bot import run_bot
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description="Bitdoze Bot (Agno + Discord)")
     parser.add_argument(
         "--config",
