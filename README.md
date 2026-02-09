@@ -7,7 +7,7 @@ A Discord-first agent powered by Agno, with Web Search, Website Scraping, Local 
 - **Agno toolkits**: WebSearchTools, HackerNewsTools, WebsiteTools, GithubTools, YouTubeTools, FileTools, ShellTools, DiscordTools
 - **Agno Teams**: native team orchestration with delegation options
 - **Team observability**: logs selected members, delegation paths, run timing, and metrics
-- **Persistent logging**: stdout + rotating file logs at `logs/bitdoze-bot.log` (10MB x 5 backups)
+- **Structured logging**: config-driven stdout + optional rotating file logs
 - **Memory**: SQLite-backed, automatic memory updates by default
 - **Learning**: Agno LearningMachine per member agent (user profile + memory stores)
 - **Soul + Heartbeat**: persona via `workspace/SOUL.md`, heartbeat checks via `workspace/HEARTBEAT.md`
@@ -49,6 +49,9 @@ Edit `config.yaml`:
 - `model`: provider, model id, base URL, and API key env var
 - `model.structured_outputs`: set `false` for providers that reject response_format (e.g., StepFun/OpenRouter)
 - `discord`: bot token env var
+- `logging`: set level, format, and rotating file settings from YAML
+- `research_mode`: enforce structured research responses and minimum source URLs
+- `tool_permissions`: runtime allow/deny rules for tool use plus JSONL audit logging
 - `memory`: `mode: automatic` (best capture), SQLite db path, history + summaries (custom prompt supported)
 - `learning`: enable Agno LearningMachine and set learning modes (`always`, `agentic`, `propose`, `hitl`)
 - `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, discord tools
@@ -95,6 +98,72 @@ agents:
 
 Rules match on `channel_ids`, `user_ids`, `guild_ids`, `contains`, and `starts_with`.
 All specified conditions in a rule must match.
+
+## Research Mode
+- Research Mode can be enabled with `research_mode.enabled`.
+- It triggers for:
+  - messages starting with `research:`
+  - messages routed to the configured research agent (default: `research`)
+- It enforces this fixed response schema:
+  - `TL;DR`
+  - `Findings`
+  - `Risks`
+  - `Sources`
+- `Sources` must contain at least `research_mode.min_sources` unique `http(s)` URLs (default: `3`).
+- On validation failure, the bot retries exactly once with stricter format instructions.
+- If retry still fails, it returns a clear error message instead of unstructured output.
+
+Example:
+
+```yaml
+research_mode:
+  enabled: true
+  trigger_on_prefix: true
+  trigger_on_research_agent: true
+  research_agent_name: research
+  min_sources: 3
+```
+
+## Tool Permissions + Audit
+- Configure runtime tool access with `tool_permissions`.
+- Supported selectors per rule:
+  - `channel_ids`
+  - `role_ids`
+  - `user_ids`
+  - `guild_ids`
+  - `agents`
+  - `tools`
+- Rule resolution is deterministic:
+  - `deny` overrides `allow`
+  - if no rule matches, `default_effect` is applied
+- Blocked tool calls return a clear user-facing message.
+- Every tool event is written to append-only JSONL audit logs with outcomes:
+  - `allowed`
+  - `blocked`
+  - `executed`
+  - `failed`
+- Audit applies to normal Discord runs, fallback tool-call execution, cron, and heartbeat runs.
+- Argument logging is off by default. If enabled, configured sensitive keys are redacted.
+
+Example:
+
+```yaml
+tool_permissions:
+  enabled: true
+  default_effect: allow
+  rules:
+    - effect: deny
+      tools: [shell]
+    - effect: allow
+      tools: [shell]
+      role_ids: [123456789012345678]
+      channel_ids: [234567890123456789]
+  audit:
+    enabled: true
+    path: logs/tool-audit.jsonl
+    include_arguments: false
+    redacted_keys: [token, secret, password, api_key, authorization]
+```
 
 ## Workspace Agents
 Agents can be added without code changes using:
@@ -145,9 +214,23 @@ The team and members share the configured SQLite DB. Team memory/history is hand
   - delegation paths extracted from `member_responses`
 
 ## Logging
-- The bot logs to both stdout and `logs/bitdoze-bot.log`.
-- File logs rotate automatically (`10MB`, `5` backups).
-- `logs/` is git-ignored.
+- Logging is configured from `config.yaml` under `logging`.
+- Defaults: `level: INFO`, `format: detailed`, file logging enabled at `logs/bitdoze-bot.log`.
+- Invalid log levels safely fall back to `INFO`.
+
+Example:
+
+```yaml
+logging:
+  level: DEBUG
+  format: detailed # detailed | simple | custom format string
+  file:
+    enabled: true
+    path: logs/bitdoze-bot.log
+    max_bytes: 10485760
+    backup_count: 5
+```
+
 - Live tail:
 
 ```bash

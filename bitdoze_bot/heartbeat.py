@@ -8,6 +8,7 @@ from typing import Callable, Awaitable
 from agno.agent import Agent
 
 from bitdoze_bot.config import Config
+from bitdoze_bot.tool_permissions import tool_runtime_context
 from bitdoze_bot.utils import read_text_if_exists
 
 
@@ -67,7 +68,14 @@ async def run_heartbeat(
     session_scope: str = "isolated",
 ) -> None:
     user_id, session_id = resolve_heartbeat_identity(session_scope)
-    response = await asyncio.to_thread(agent.run, prompt, user_id=user_id, session_id=session_id)
+    agent_name = str(getattr(agent, "name", "unknown"))
+    with tool_runtime_context(
+        run_kind="heartbeat",
+        user_id=user_id,
+        session_id=session_id,
+        agent_name=agent_name,
+    ):
+        response = await asyncio.to_thread(agent.run, prompt, user_id=user_id, session_id=session_id)
     content = getattr(response, "content", None) or str(response)
     if content.strip().startswith(quiet_ack):
         return

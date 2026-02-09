@@ -8,6 +8,44 @@ model:
 discord:
     token_env: DISCORD_BOT_TOKEN
 
+logging:
+    level: INFO # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    format: detailed # detailed | simple | custom format string
+    file:
+        enabled: true
+        path: logs/bitdoze-bot.log
+        max_bytes: 10485760 # 10MB
+        backup_count: 5
+
+research_mode:
+    enabled: true
+    trigger_on_prefix: true # activates for messages that start with "research:"
+    trigger_on_research_agent: true # activates when routed target is the research agent
+    research_agent_name: research
+    min_sources: 3 # minimum unique http(s) URLs in Sources
+
+tool_permissions:
+    enabled: false # default off for backward-compatible permissive behavior
+    default_effect: allow # allow | deny (applies when no rule matches)
+    rules: []
+    # rules:
+    #   - effect: deny
+    #     tools: [shell]
+    #   - effect: allow
+    #     tools: [shell]
+    #     role_ids: [123456789012345678]
+    #     channel_ids: [234567890123456789]
+    #   - effect: deny
+    #     tools: [github]
+    #     user_ids: [345678901234567890]
+    #     guild_ids: [456789012345678901]
+    #     agents: [research]
+    audit:
+        enabled: true
+        path: logs/tool-audit.jsonl
+        include_arguments: false # set true to record args/kwargs
+        redacted_keys: [token, secret, password, api_key, authorization]
+
 memory:
     mode: automatic
     db_file: data/bitdoze.db

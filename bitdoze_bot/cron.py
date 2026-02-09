@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from bitdoze_bot.config import Config
+from bitdoze_bot.tool_permissions import tool_runtime_context
 
 
 @dataclass(frozen=True)
@@ -101,12 +102,19 @@ async def run_cron_job(
     session_id = "cron:isolated"
     if job.session_scope == "main":
         session_id = "cron:main"
-    response = await asyncio.to_thread(
-        agent.run,
-        job.message,
+    agent_name = str(getattr(agent, "name", "unknown"))
+    with tool_runtime_context(
+        run_kind="cron",
         user_id="cron",
         session_id=session_id,
-    )
+        agent_name=agent_name,
+    ):
+        response = await asyncio.to_thread(
+            agent.run,
+            job.message,
+            user_id="cron",
+            session_id=session_id,
+        )
     content = getattr(response, "content", None) or str(response)
     if job.deliver and send_fn is not None:
         await send_fn(content)

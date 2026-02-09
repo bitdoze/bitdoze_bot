@@ -31,6 +31,7 @@ from bitdoze_bot.heartbeat import (
     load_heartbeat_config,
     run_heartbeat,
 )
+from bitdoze_bot.tool_permissions import ToolPermissionError, tool_runtime_context
 from bitdoze_bot.utils import read_text_if_exists
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,165 @@ logger = logging.getLogger(__name__)
 class DiscordRuntime:
     config: Config
     agents: AgentRegistry
+
+
+@dataclass(frozen=True)
+class ResearchModeConfig:
+    enabled: bool = True
+    trigger_on_prefix: bool = True
+    trigger_on_research_agent: bool = True
+    research_agent_name: str = "research"
+    min_sources: int = 3
+
+
+@dataclass(frozen=True)
+class ResearchValidationResult:
+    valid: bool
+    missing_sections: tuple[str, ...]
+    source_count: int
+    min_sources: int
+
+
+_RESEARCH_REQUIRED_SECTIONS = ("TL;DR", "Findings", "Risks", "Sources")
+_RESEARCH_FAILURE_MESSAGE = (
+    "I couldn't produce a valid research response in the required format. "
+    "Please retry with a narrower topic or clearer request."
+)
+
+
+def _parse_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _parse_non_negative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _load_research_mode_config(config: Config) -> ResearchModeConfig:
+    raw = config.get("research_mode", default={})
+    cfg = raw if isinstance(raw, dict) else {}
+    return ResearchModeConfig(
+        enabled=_parse_bool(cfg.get("enabled", True), True),
+        trigger_on_prefix=_parse_bool(cfg.get("trigger_on_prefix", True), True),
+        trigger_on_research_agent=_parse_bool(cfg.get("trigger_on_research_agent", True), True),
+        research_agent_name=str(cfg.get("research_agent_name", "research")).strip() or "research",
+        min_sources=max(_parse_non_negative_int(cfg.get("min_sources", 3), 3), 1),
+    )
+
+
+def _is_research_prefixed(content: str) -> bool:
+    return content.lower().startswith("research:")
+
+
+def _strip_research_prefix(content: str) -> str:
+    if not _is_research_prefixed(content):
+        return content.strip()
+    return content[len("research:") :].strip()
+
+
+def _is_research_mode_request(
+    cfg: ResearchModeConfig,
+    content: str,
+    selected_target_name: str | None,
+) -> bool:
+    if not cfg.enabled:
+        return False
+    by_prefix = cfg.trigger_on_prefix and _is_research_prefixed(content)
+    by_target = (
+        cfg.trigger_on_research_agent
+        and bool(selected_target_name)
+        and str(selected_target_name).strip().lower() == cfg.research_agent_name.lower()
+    )
+    return by_prefix or by_target
+
+
+def _build_research_prompt(query: str, min_sources: int) -> str:
+    return (
+        "Research request:\n"
+        f"{query.strip()}\n\n"
+        "Return exactly these sections in this order:\n"
+        "TL;DR\n"
+        "Findings\n"
+        "Risks\n"
+        "Sources\n\n"
+        "Requirements:\n"
+        f"- In Sources, include at least {min_sources} unique http(s) URLs.\n"
+        "- Keep Findings and Risks concise bullet lists.\n"
+    )
+
+
+def _section_header_pattern(section: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"^\s*(?:#+\s*)?{re.escape(section)}\s*:?\s*$|^\s*(?:#+\s*)?{re.escape(section)}\s*:\s+\S",
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+
+def _extract_sources_block(text: str) -> str:
+    sources_start = re.search(r"(?im)^\s*(?:#+\s*)?Sources\s*:?", text)
+    if not sources_start:
+        return ""
+    return text[sources_start.end() :]
+
+
+def _extract_unique_http_urls(text: str) -> set[str]:
+    raw_urls = re.findall(r"https?://\S+", text, flags=re.IGNORECASE)
+    cleaned: set[str] = set()
+    for url in raw_urls:
+        cleaned.add(url.rstrip(".,);:!?]}'\""))
+    return cleaned
+
+
+def _validate_research_response(text: str, min_sources: int) -> ResearchValidationResult:
+    missing_sections: list[str] = []
+    for section in _RESEARCH_REQUIRED_SECTIONS:
+        if not _section_header_pattern(section).search(text):
+            missing_sections.append(section)
+    sources_block = _extract_sources_block(text)
+    unique_urls = _extract_unique_http_urls(sources_block)
+    valid = not missing_sections and len(unique_urls) >= min_sources
+    return ResearchValidationResult(
+        valid=valid,
+        missing_sections=tuple(missing_sections),
+        source_count=len(unique_urls),
+        min_sources=min_sources,
+    )
+
+
+def _build_research_retry_prompt(query: str, validation: ResearchValidationResult) -> str:
+    issues: list[str] = []
+    if validation.missing_sections:
+        issues.append("missing sections: " + ", ".join(validation.missing_sections))
+    if validation.source_count < validation.min_sources:
+        issues.append(
+            f"insufficient source URLs in Sources: {validation.source_count}/{validation.min_sources}"
+        )
+    issue_summary = "; ".join(issues) if issues else "format mismatch"
+    return (
+        "Retry the research answer and strictly follow this format.\n"
+        f"Validation issues: {issue_summary}\n\n"
+        "Return exactly these sections in this order:\n"
+        "TL;DR\n"
+        "Findings\n"
+        "Risks\n"
+        "Sources\n\n"
+        "Requirements:\n"
+        f"- Sources must include at least {validation.min_sources} unique http(s) URLs.\n"
+        "- Do not include any extra sections.\n\n"
+        f"Research request:\n{query.strip()}\n"
+    )
 
 
 def _strip_bot_mention(content: str, bot_user_id: int) -> str:
@@ -250,6 +410,16 @@ def _build_user_context(config: Config, message: discord.Message) -> str:
     return "\n\n".join(sections).strip()
 
 
+def _extract_role_ids(message: discord.Message) -> list[int]:
+    roles = getattr(message.author, "roles", None) or []
+    role_ids: list[int] = []
+    for role in roles:
+        role_id = getattr(role, "id", None)
+        if isinstance(role_id, int):
+            role_ids.append(role_id)
+    return role_ids
+
+
 class DiscordAgentBot(commands.Bot):
     def __init__(self, runtime: DiscordRuntime) -> None:
         intents = discord.Intents.default()
@@ -279,9 +449,9 @@ class DiscordAgentBot(commands.Bot):
     async def on_ready(self) -> None:
         user = self.user
         if user is not None:
-            print(f"Logged in as {user} (id: {user.id})")
+            logger.info("Logged in as %s (id: %s)", user, user.id)
         else:
-            print("Logged in (user not available yet)")
+            logger.info("Logged in (user not available yet)")
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -307,12 +477,21 @@ class DiscordAgentBot(commands.Bot):
         selected_agent = _select_agent_name(self.runtime.config, message, agent_hint)
         agent = self.runtime.agents.get(selected_agent)
         agent_name = _agent_name(agent, selected_agent)
+        research_cfg = _load_research_mode_config(self.runtime.config)
+        research_mode_active = _is_research_mode_request(research_cfg, content, agent_name)
         logger.info(
             "Active agent for message (guild=%s channel=%s user=%s): %s",
             message.guild.id if message.guild else "dm",
             message.channel.id,
             message.author.id,
             agent_name,
+        )
+        logger.info(
+            "Research mode active=%s trigger_prefix=%s trigger_research_agent=%s target=%s",
+            research_mode_active,
+            _is_research_prefixed(content),
+            agent_name.strip().lower() == research_cfg.research_agent_name.lower(),
+            research_cfg.research_agent_name,
         )
         tools = getattr(agent, "tools", None) or []
         for tool in tools:
@@ -330,19 +509,43 @@ class DiscordAgentBot(commands.Bot):
 
         session_id = f"discord:{message.guild.id if message.guild else 'dm'}:{message.channel.id}"
         user_id = f"discord:{message.author.id}"
+        role_ids = _extract_role_ids(message)
 
         try:
-            async with message.channel.typing():
-                user_context = _build_user_context(self.runtime.config, message)
-                reply = await _run_agent(
-                    agent,
-                    content,
-                    user_context,
-                    user_id,
-                    session_id,
-                )
-                if "<tool_call>" in reply:
-                    reply = await _handle_toolcall_fallback(agent, reply)
+            with tool_runtime_context(
+                run_kind="discord",
+                user_id=user_id,
+                session_id=session_id,
+                discord_user_id=message.author.id,
+                channel_id=message.channel.id,
+                guild_id=message.guild.id if message.guild else None,
+                role_ids=role_ids,
+                agent_name=agent_name,
+            ):
+                async with message.channel.typing():
+                    user_context = _build_user_context(self.runtime.config, message)
+                    if research_mode_active:
+                        reply = await _run_research_mode(
+                            agent,
+                            content,
+                            user_context,
+                            user_id,
+                            session_id,
+                            research_cfg,
+                        )
+                    else:
+                        reply = await _run_agent(
+                            agent,
+                            content,
+                            user_context,
+                            user_id,
+                            session_id,
+                        )
+                        if "<tool_call>" in reply:
+                            reply = await _handle_toolcall_fallback(agent, reply)
+        except ToolPermissionError as exc:
+            await message.channel.send(str(exc))
+            return
         except Exception as exc:  # noqa: BLE001
             await message.channel.send(f"Error: {exc}")
             return
@@ -516,6 +719,48 @@ async def _handle_toolcall_fallback(agent, reply: str) -> str:
         prompt += f"{item['name']}:\n{item['output']}\n\n"
     response = await asyncio.to_thread(agent.run, prompt, user_id="tool_fallback", session_id="tool_fallback")
     return getattr(response, "content", None) or str(response)
+
+
+async def _run_research_mode(
+    agent,
+    content: str,
+    user_context: str | None,
+    user_id: str,
+    session_id: str,
+    research_cfg: ResearchModeConfig,
+) -> str:
+    query = _strip_research_prefix(content)
+    prompt = _build_research_prompt(query or content, research_cfg.min_sources)
+    reply = await _run_agent(agent, prompt, user_context, user_id, session_id)
+    if "<tool_call>" in reply:
+        reply = await _handle_toolcall_fallback(agent, reply)
+
+    first_validation = _validate_research_response(reply, research_cfg.min_sources)
+    if first_validation.valid:
+        return reply
+
+    logger.warning(
+        "Research mode validation failed; retrying once missing_sections=%s source_count=%d min_sources=%d",
+        ", ".join(first_validation.missing_sections) or "none",
+        first_validation.source_count,
+        first_validation.min_sources,
+    )
+    retry_prompt = _build_research_retry_prompt(query or content, first_validation)
+    retry_reply = await _run_agent(agent, retry_prompt, user_context, user_id, session_id)
+    if "<tool_call>" in retry_reply:
+        retry_reply = await _handle_toolcall_fallback(agent, retry_reply)
+
+    second_validation = _validate_research_response(retry_reply, research_cfg.min_sources)
+    if second_validation.valid:
+        return retry_reply
+
+    logger.error(
+        "Research mode retry failed missing_sections=%s source_count=%d min_sources=%d",
+        ", ".join(second_validation.missing_sections) or "none",
+        second_validation.source_count,
+        second_validation.min_sources,
+    )
+    return _RESEARCH_FAILURE_MESSAGE
 
 
 def build_runtime(config_path: str) -> DiscordRuntime:

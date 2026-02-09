@@ -33,6 +33,7 @@ from agno.tools.website import WebsiteTools
 from agno.tools.youtube import YouTubeTools
 
 from bitdoze_bot.config import Config
+from bitdoze_bot.tool_permissions import ToolPermissionManager, get_tool_runtime_context
 from bitdoze_bot.utils import read_text_if_exists
 
 logger = logging.getLogger(__name__)
@@ -388,6 +389,13 @@ def _coerce_debug_level(value: Any, default: Literal[1, 2] = 1) -> Literal[1, 2]
 
 def build_agents(config: Config) -> AgentRegistry:
     tools = _build_tools(config)
+    permission_manager = ToolPermissionManager.from_config(config)
+    for tool_name, tool in list(tools.items()):
+        tools[tool_name] = permission_manager.wrap_tool(
+            tool=tool,
+            tool_name=tool_name,
+            agent_name_getter=lambda: get_tool_runtime_context().agent_name or "unknown",
+        )
 
     memory_cfg = config.get("memory", default={})
     db_file = memory_cfg.get("db_file", "data/bitdoze.db")
