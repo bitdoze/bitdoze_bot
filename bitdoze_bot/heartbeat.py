@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Awaitable
+from typing import Any, Callable, Awaitable
 
 from agno.agent import Agent
 
 from bitdoze_bot.config import Config
 from bitdoze_bot.tool_permissions import tool_runtime_context
 from bitdoze_bot.utils import read_text_if_exists
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_HEARTBEAT_TIMEOUT = 120
 
 
 @dataclass
@@ -20,6 +25,15 @@ class HeartbeatConfig:
     prompt_path: str
     session_scope: str
     agent: str | None
+    channel_id: int | None
+
+
+def _safe_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def load_heartbeat_config(config: Config) -> HeartbeatConfig:
@@ -31,13 +45,21 @@ def load_heartbeat_config(config: Config) -> HeartbeatConfig:
     session_scope = str(hb_cfg.get("session_scope", "isolated")).strip().lower()
     if session_scope not in {"shared", "isolated"}:
         session_scope = "isolated"
+    raw_channel_id = hb_cfg.get("channel_id")
+    channel_id: int | None = None
+    if raw_channel_id is not None:
+        try:
+            channel_id = int(raw_channel_id)
+        except (TypeError, ValueError):
+            channel_id = None
     return HeartbeatConfig(
         enabled=bool(hb_cfg.get("enabled", True)),
-        interval_minutes=int(hb_cfg.get("interval_minutes", 30)),
+        interval_minutes=_safe_positive_int(hb_cfg.get("interval_minutes", 30), 30),
         quiet_ack=str(hb_cfg.get("quiet_ack", "HEARTBEAT_OK")),
         prompt_path=str(hb_cfg.get("prompt_path", "workspace/HEARTBEAT.md")),
         session_scope=session_scope,
         agent=agent,
+        channel_id=channel_id,
     )
 
 
@@ -66,7 +88,9 @@ async def run_heartbeat(
     quiet_ack: str,
     send_fn: Callable[[str], Awaitable[None]],
     session_scope: str = "isolated",
+    timeout: int | None = None,
 ) -> None:
+    effective_timeout = timeout or _DEFAULT_HEARTBEAT_TIMEOUT
     user_id, session_id = resolve_heartbeat_identity(session_scope)
     agent_name = str(getattr(agent, "name", "unknown"))
     with tool_runtime_context(
@@ -75,7 +99,14 @@ async def run_heartbeat(
         session_id=session_id,
         agent_name=agent_name,
     ):
-        response = await asyncio.to_thread(agent.run, prompt, user_id=user_id, session_id=session_id)
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(agent.run, prompt, user_id=user_id, session_id=session_id),
+                timeout=effective_timeout,
+            )
+        except TimeoutError:
+            logger.warning("Heartbeat run timed out after %ds", effective_timeout)
+            return
     content = getattr(response, "content", None) or str(response)
     if content.strip().startswith(quiet_ack):
         return

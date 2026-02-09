@@ -3,7 +3,7 @@ timezone: Europe/Bucharest
 channel_id: 1395291091627937906
 jobs:
     - name: daily-status
-      cron: "0 8 * * *"
+      cron: "0 15 * * *"
       timezone: Europe/Bucharest
       agent: main
       message: "Send the latest news from AI and from tech, you can access the current date and time if you want you should have the details. Search the web and heacker news for latest ones. Provide also the trading github repos for the day from open source (it needs to be for the day)"

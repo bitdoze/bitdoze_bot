@@ -80,7 +80,7 @@ def test_run_research_mode_retries_once_and_returns_valid(monkeypatch) -> None:
         "TL;DR\nshort\n\nFindings\n- one\n\nRisks\n- one\n\nSources\n- https://a.example.com\n- https://b.example.com\n- https://c.example.com",
     ]
 
-    async def fake_run_agent(agent, content, user_context, user_id, session_id):
+    async def fake_run_agent(agent, content, user_context, user_id, session_id, runtime_cfg=None):
         calls.append(content)
         return responses[len(calls) - 1]
 
@@ -104,7 +104,7 @@ def test_run_research_mode_retries_once_and_returns_valid(monkeypatch) -> None:
 def test_run_research_mode_returns_failure_after_retry(monkeypatch) -> None:
     calls = 0
 
-    async def fake_run_agent(agent, content, user_context, user_id, session_id):
+    async def fake_run_agent(agent, content, user_context, user_id, session_id, runtime_cfg=None):
         nonlocal calls
         calls += 1
         return "TL;DR\nshort\n\nFindings\n- one\n\nRisks\n- one\n\nSources\n- https://a.example.com"

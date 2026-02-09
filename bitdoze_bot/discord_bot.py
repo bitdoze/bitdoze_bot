@@ -16,6 +16,7 @@ import discord
 from discord.ext import commands, tasks
 
 from agno.run.agent import Message
+from agno.team import Team
 
 from bitdoze_bot.agents import AgentRegistry, build_agents
 from bitdoze_bot.config import Config, load_config
@@ -32,15 +33,43 @@ from bitdoze_bot.heartbeat import (
     run_heartbeat,
 )
 from bitdoze_bot.tool_permissions import ToolPermissionError, tool_runtime_context
-from bitdoze_bot.utils import read_text_if_exists
+from bitdoze_bot.utils import parse_bool, read_text_if_exists
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    agent_timeout: int = 600
+    cron_timeout: int = 600
+    heartbeat_timeout: int = 120
+    max_concurrent_runs: int = 4
+
+
+def _safe_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def load_runtime_config(config: Config) -> RuntimeConfig:
+    raw = config.get("runtime", default={})
+    cfg = raw if isinstance(raw, dict) else {}
+    return RuntimeConfig(
+        agent_timeout=_safe_positive_int(cfg.get("agent_timeout"), 600),
+        cron_timeout=_safe_positive_int(cfg.get("cron_timeout"), 600),
+        heartbeat_timeout=_safe_positive_int(cfg.get("heartbeat_timeout"), 120),
+        max_concurrent_runs=_safe_positive_int(cfg.get("max_concurrent_runs"), 4),
+    )
 
 
 @dataclass
 class DiscordRuntime:
     config: Config
     agents: AgentRegistry
+    runtime_cfg: RuntimeConfig
 
 
 @dataclass(frozen=True)
@@ -67,18 +96,6 @@ _RESEARCH_FAILURE_MESSAGE = (
 )
 
 
-def _parse_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "off"}:
-            return False
-    return default
-
-
 def _parse_non_negative_int(value: Any, default: int) -> int:
     try:
         parsed = int(value)
@@ -91,9 +108,9 @@ def _load_research_mode_config(config: Config) -> ResearchModeConfig:
     raw = config.get("research_mode", default={})
     cfg = raw if isinstance(raw, dict) else {}
     return ResearchModeConfig(
-        enabled=_parse_bool(cfg.get("enabled", True), True),
-        trigger_on_prefix=_parse_bool(cfg.get("trigger_on_prefix", True), True),
-        trigger_on_research_agent=_parse_bool(cfg.get("trigger_on_research_agent", True), True),
+        enabled=parse_bool(cfg.get("enabled", True), True),
+        trigger_on_prefix=parse_bool(cfg.get("trigger_on_prefix", True), True),
+        trigger_on_research_agent=parse_bool(cfg.get("trigger_on_research_agent", True), True),
         research_agent_name=str(cfg.get("research_agent_name", "research")).strip() or "research",
         min_sources=max(_parse_non_negative_int(cfg.get("min_sources", 3), 3), 1),
     )
@@ -230,7 +247,7 @@ def _build_response_input(user_context: str | None, content: str) -> list[Messag
 
 
 def _is_team_target(target: Any) -> bool:
-    return hasattr(target, "members")
+    return isinstance(target, Team)
 
 
 def _target_members(target: Any) -> list[str]:
@@ -274,13 +291,27 @@ def _collect_delegation_paths(node: Any, prefix: str = "") -> list[str]:
     return paths
 
 
+_run_semaphore: asyncio.Semaphore | None = None
+_run_semaphore_size: int | None = None
+
+
+def _get_run_semaphore(max_concurrent: int = 4) -> asyncio.Semaphore:
+    global _run_semaphore, _run_semaphore_size  # noqa: PLW0603
+    if _run_semaphore is None or _run_semaphore_size != max_concurrent:
+        _run_semaphore = asyncio.Semaphore(max_concurrent)
+        _run_semaphore_size = max_concurrent
+    return _run_semaphore
+
+
 async def _run_agent(
     agent,
     content: str,
     user_context: str | None,
     user_id: str,
     session_id: str,
+    runtime_cfg: RuntimeConfig | None = None,
 ) -> str:
+    cfg = runtime_cfg or RuntimeConfig()
     response_input = _build_response_input(user_context, content)
     target_name = _agent_name(agent)
     target_kind = "team" if _is_team_target(agent) else "agent"
@@ -294,12 +325,16 @@ async def _run_agent(
         ", ".join(members) if members else "none",
     )
     started_at = perf_counter()
-    response = await asyncio.to_thread(
-        agent.run,
-        response_input,
-        user_id=user_id,
-        session_id=session_id,
-    )
+    async with _get_run_semaphore(cfg.max_concurrent_runs):
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                agent.run,
+                response_input,
+                user_id=user_id,
+                session_id=session_id,
+            ),
+            timeout=cfg.agent_timeout,
+        )
     elapsed_ms = int((perf_counter() - started_at) * 1000)
     run_id = getattr(response, "run_id", None)
     model = getattr(response, "model", None)
@@ -446,6 +481,17 @@ class DiscordAgentBot(commands.Bot):
             self._cron_scheduler.start()
         self._cron_watch_loop.start()
 
+    async def close(self) -> None:
+        logger.info("Shutting down bot...")
+        if self._heartbeat_loop.is_running():
+            self._heartbeat_loop.cancel()
+        if self._cron_watch_loop.is_running():
+            self._cron_watch_loop.cancel()
+        if self._cron_scheduler.running:
+            self._cron_scheduler.shutdown(wait=False)
+        await super().close()
+        logger.info("Bot shutdown complete")
+
     async def on_ready(self) -> None:
         user = self.user
         if user is not None:
@@ -524,6 +570,7 @@ class DiscordAgentBot(commands.Bot):
             ):
                 async with message.channel.typing():
                     user_context = _build_user_context(self.runtime.config, message)
+                    rt_cfg = self.runtime.runtime_cfg
                     if research_mode_active:
                         reply = await _run_research_mode(
                             agent,
@@ -532,6 +579,7 @@ class DiscordAgentBot(commands.Bot):
                             user_id,
                             session_id,
                             research_cfg,
+                            rt_cfg,
                         )
                     else:
                         reply = await _run_agent(
@@ -540,14 +588,21 @@ class DiscordAgentBot(commands.Bot):
                             user_context,
                             user_id,
                             session_id,
+                            rt_cfg,
                         )
                         if "<tool_call>" in reply:
-                            reply = await _handle_toolcall_fallback(agent, reply)
+                            reply = await _handle_toolcall_fallback(agent, reply, rt_cfg)
+        except TimeoutError:
+            await message.channel.send(
+                "The request timed out. Please try again with a simpler query."
+            )
+            return
         except ToolPermissionError as exc:
-            await message.channel.send(str(exc))
+            await message.channel.send(str(exc)[:1900])
             return
         except Exception as exc:  # noqa: BLE001
-            await message.channel.send(f"Error: {exc}")
+            error_msg = f"Error: {exc}"
+            await message.channel.send(error_msg[:1900])
             return
 
         self.last_active_channel_id = message.channel.id
@@ -557,7 +612,7 @@ class DiscordAgentBot(commands.Bot):
         if not self.heartbeat_cfg.enabled:
             return
 
-        channel_id = self.runtime.config.get("heartbeat", "channel_id", default=None)
+        channel_id = self.heartbeat_cfg.channel_id
         if channel_id is None:
             channel_id = self.last_active_channel_id
         if channel_id is None:
@@ -585,6 +640,7 @@ class DiscordAgentBot(commands.Bot):
             self.heartbeat_cfg.quiet_ack,
             send_fn,
             session_scope=self.heartbeat_cfg.session_scope,
+            timeout=self.runtime.runtime_cfg.heartbeat_timeout,
         )
 
     def _configure_cron_jobs(self) -> None:
@@ -593,6 +649,8 @@ class DiscordAgentBot(commands.Bot):
         for job in self.cron_cfg.jobs:
             timezone = job.timezone or self.cron_cfg.default_timezone
             trigger = build_cron_trigger(job.cron, timezone)
+            if trigger is None:
+                continue
             self._cron_scheduler.add_job(
                 self._run_cron_job,
                 trigger=trigger,
@@ -644,7 +702,7 @@ class DiscordAgentBot(commands.Bot):
             job.agent or self.runtime.agents.default_target,
         )
         agent = self.runtime.agents.get(job.agent)
-        await run_cron_job(agent, job, send_fn)
+        await run_cron_job(agent, job, send_fn, timeout=self.runtime.runtime_cfg.cron_timeout)
 
 
 async def _send_chunked(channel: discord.abc.Messageable, content: str) -> None:
@@ -661,7 +719,9 @@ async def _send_chunked(channel: discord.abc.Messageable, content: str) -> None:
         remaining = remaining[split_at:].lstrip()
     if remaining:
         chunks.append(remaining)
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
+        if i > 0:
+            await asyncio.sleep(0.3)
         await channel.send(chunk)
 
 
@@ -687,6 +747,18 @@ def _parse_tool_calls(text: str) -> list[dict[str, Any]]:
     return calls
 
 
+_FALLBACK_DENIED_TOOLS: set[str] = {"shell", "discord"}
+
+
+def _get_declared_functions(tool: Any) -> set[str]:
+    get_functions = getattr(tool, "get_functions", None)
+    if callable(get_functions):
+        funcs = get_functions()
+        if isinstance(funcs, dict):
+            return set(funcs.keys())
+    return set()
+
+
 async def _run_tool_calls(agent, calls: list[dict[str, Any]]) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     tools = getattr(agent, "tools", None) or []
@@ -695,19 +767,35 @@ async def _run_tool_calls(agent, calls: list[dict[str, Any]]) -> list[dict[str, 
         params = cast(dict[str, Any], call.get("params", {}))
         target = None
         for tool in tools:
+            tool_name = getattr(tool, "_bitdoze_tool_name", "") or ""
+            if tool_name.lower() in _FALLBACK_DENIED_TOOLS:
+                continue
+            declared = _get_declared_functions(tool)
+            if declared and func_name not in declared:
+                continue
+            if not declared:
+                continue
             fn = getattr(tool, func_name, None)
             if callable(fn):
                 target = fn
                 break
         if target is None:
-            logger.error("Tool function not found: %s", func_name)
+            logger.warning("Tool fallback: function '%s' not found or denied", func_name)
             continue
-        output = await asyncio.to_thread(target, **params)
+        try:
+            output = await asyncio.to_thread(target, **params)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Tool fallback: function '%s' failed: %s", func_name, exc)
+            results.append({"name": func_name, "output": f"Error: {exc}"})
+            continue
         results.append({"name": func_name, "output": str(output)})
     return results
 
 
-async def _handle_toolcall_fallback(agent, reply: str) -> str:
+async def _handle_toolcall_fallback(
+    agent, reply: str, runtime_cfg: RuntimeConfig | None = None
+) -> str:
+    cfg = runtime_cfg or RuntimeConfig()
     calls = _parse_tool_calls(reply)
     if not calls:
         return reply
@@ -717,7 +805,10 @@ async def _handle_toolcall_fallback(agent, reply: str) -> str:
     prompt = "Summarize these tool results for Discord. Use bullets and include links when present.\n\n"
     for item in results:
         prompt += f"{item['name']}:\n{item['output']}\n\n"
-    response = await asyncio.to_thread(agent.run, prompt, user_id="tool_fallback", session_id="tool_fallback")
+    response = await asyncio.wait_for(
+        asyncio.to_thread(agent.run, prompt, user_id="tool_fallback", session_id="tool_fallback"),
+        timeout=cfg.agent_timeout,
+    )
     return getattr(response, "content", None) or str(response)
 
 
@@ -728,12 +819,13 @@ async def _run_research_mode(
     user_id: str,
     session_id: str,
     research_cfg: ResearchModeConfig,
+    runtime_cfg: RuntimeConfig | None = None,
 ) -> str:
     query = _strip_research_prefix(content)
     prompt = _build_research_prompt(query or content, research_cfg.min_sources)
-    reply = await _run_agent(agent, prompt, user_context, user_id, session_id)
+    reply = await _run_agent(agent, prompt, user_context, user_id, session_id, runtime_cfg)
     if "<tool_call>" in reply:
-        reply = await _handle_toolcall_fallback(agent, reply)
+        reply = await _handle_toolcall_fallback(agent, reply, runtime_cfg)
 
     first_validation = _validate_research_response(reply, research_cfg.min_sources)
     if first_validation.valid:
@@ -746,9 +838,9 @@ async def _run_research_mode(
         first_validation.min_sources,
     )
     retry_prompt = _build_research_retry_prompt(query or content, first_validation)
-    retry_reply = await _run_agent(agent, retry_prompt, user_context, user_id, session_id)
+    retry_reply = await _run_agent(agent, retry_prompt, user_context, user_id, session_id, runtime_cfg)
     if "<tool_call>" in retry_reply:
-        retry_reply = await _handle_toolcall_fallback(agent, retry_reply)
+        retry_reply = await _handle_toolcall_fallback(agent, retry_reply, runtime_cfg)
 
     second_validation = _validate_research_response(retry_reply, research_cfg.min_sources)
     if second_validation.valid:
@@ -766,7 +858,8 @@ async def _run_research_mode(
 def build_runtime(config_path: str) -> DiscordRuntime:
     config = load_config(config_path)
     agents = build_agents(config)
-    return DiscordRuntime(config=config, agents=agents)
+    runtime_cfg = load_runtime_config(config)
+    return DiscordRuntime(config=config, agents=agents, runtime_cfg=runtime_cfg)
 
 
 def run_bot(config_path: str) -> None:

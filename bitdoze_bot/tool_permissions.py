@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bitdoze_bot.config import Config
+from bitdoze_bot.utils import parse_bool
 
 
 class ToolPermissionError(PermissionError):
@@ -76,18 +77,6 @@ _CURRENT_CONTEXT: contextvars.ContextVar[ToolRuntimeContext] = contextvars.Conte
 )
 
 
-def _parse_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "off"}:
-            return False
-    return default
-
-
 def _to_int_tuple(value: Any) -> tuple[int, ...]:
     if not isinstance(value, list | tuple):
         return ()
@@ -140,7 +129,7 @@ def load_tool_permission_config(config: Config) -> ToolPermissionConfig:
         default_effect = "allow"
 
     return ToolPermissionConfig(
-        enabled=_parse_bool(cfg.get("enabled", False), False),
+        enabled=parse_bool(cfg.get("enabled", False), False),
         default_effect=default_effect,
         rules=tuple(rules),
     )
@@ -151,9 +140,9 @@ def load_tool_audit_config(config: Config) -> ToolAuditConfig:
     cfg = raw if isinstance(raw, dict) else {}
     redacted = _to_str_tuple(cfg.get("redacted_keys"))
     return ToolAuditConfig(
-        enabled=_parse_bool(cfg.get("enabled", True), True),
+        enabled=parse_bool(cfg.get("enabled", True), True),
         path=Path(str(cfg.get("path", "logs/tool-audit.jsonl"))),
-        include_arguments=_parse_bool(cfg.get("include_arguments", False), False),
+        include_arguments=parse_bool(cfg.get("include_arguments", False), False),
         redacted_keys=redacted
         or ("token", "secret", "password", "api_key", "authorization"),
     )

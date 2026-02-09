@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from bitdoze_bot.config import Config
+from bitdoze_bot.utils import parse_bool
 
 DEFAULT_LEVEL_NAME = "INFO"
 DEFAULT_FORMATS = {
@@ -62,18 +63,6 @@ def _parse_format(format_value: Any) -> str:
     return DEFAULT_FORMATS["detailed"]
 
 
-def _parse_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "off"}:
-            return False
-    return default
-
-
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
@@ -89,7 +78,7 @@ def build_logging_settings(config: Config) -> LoggingSettings:
 
     file_cfg = _as_mapping(logging_cfg.get("file", {}))
     file_settings = FileLoggingSettings(
-        enabled=_parse_bool(file_cfg.get("enabled", True), True),
+        enabled=parse_bool(file_cfg.get("enabled", True), True),
         path=Path(str(file_cfg.get("path", "logs/bitdoze-bot.log"))),
         max_bytes=_parse_positive_int(file_cfg.get("max_bytes"), 10 * 1024 * 1024),
         backup_count=_parse_positive_int(file_cfg.get("backup_count"), 5),

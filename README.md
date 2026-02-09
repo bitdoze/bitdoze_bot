@@ -49,6 +49,7 @@ Edit `config.yaml`:
 - `model`: provider, model id, base URL, and API key env var
 - `model.structured_outputs`: set `false` for providers that reject response_format (e.g., StepFun/OpenRouter)
 - `discord`: bot token env var
+- `runtime`: timeouts for agent runs, cron, heartbeat, and max concurrency
 - `logging`: set level, format, and rotating file settings from YAML
 - `research_mode`: enforce structured research responses and minimum source URLs
 - `tool_permissions`: runtime allow/deny rules for tool use plus JSONL audit logging
@@ -236,6 +237,23 @@ logging:
 ```bash
 tail -f logs/bitdoze-bot.log
 ```
+
+## Runtime Timeouts + Concurrency
+Each `agent.run()` call is guarded by a configurable timeout. This applies per call, not per
+full flow — a research mode request that retries once gets the timeout applied to each attempt
+independently.
+
+```yaml
+runtime:
+  agent_timeout: 600       # seconds per agent.run for Discord messages and research
+  cron_timeout: 600        # seconds per agent.run for cron jobs
+  heartbeat_timeout: 120   # seconds per agent.run for heartbeat
+  max_concurrent_runs: 4   # max parallel agent.run calls across all sources
+```
+
+- If a run exceeds its timeout the bot replies with a timeout message (Discord) or logs a warning (cron/heartbeat) and moves on.
+- `max_concurrent_runs` limits how many `agent.run` calls can execute in parallel across Discord messages, cron, and heartbeat combined.
+- All values are optional and fall back to the defaults shown above when omitted.
 
 ## How It Works
 Runtime flow:
