@@ -10,7 +10,7 @@ from agno.agent import Agent
 
 from bitdoze_bot.config import Config
 from bitdoze_bot.tool_permissions import tool_runtime_context
-from bitdoze_bot.utils import read_text_if_exists
+from bitdoze_bot.utils import extract_response_text, read_text_if_exists
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,9 @@ async def run_heartbeat(
         except TimeoutError:
             logger.warning("Heartbeat run timed out after %ds", effective_timeout)
             return
-    content = getattr(response, "content", None) or str(response)
+    content = extract_response_text(response).strip()
+    if not content:
+        return
     if content.strip().startswith(quiet_ack):
         return
     await send_fn(content)

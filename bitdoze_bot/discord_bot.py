@@ -33,7 +33,7 @@ from bitdoze_bot.heartbeat import (
     run_heartbeat,
 )
 from bitdoze_bot.tool_permissions import ToolPermissionError, tool_runtime_context
-from bitdoze_bot.utils import parse_bool, read_text_if_exists
+from bitdoze_bot.utils import extract_response_text, parse_bool, read_text_if_exists
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +350,7 @@ async def _run_agent(
         metrics or {},
         " | ".join(delegation_paths) if delegation_paths else "n/a",
     )
-    return getattr(response, "content", None) or str(response)
+    return extract_response_text(response)
 
 
 def _agent_name(agent: Any, fallback: str | None = None) -> str:
@@ -813,7 +813,7 @@ async def _handle_toolcall_fallback(
         asyncio.to_thread(agent.run, prompt, user_id="tool_fallback", session_id="tool_fallback"),
         timeout=cfg.agent_timeout,
     )
-    return getattr(response, "content", None) or str(response)
+    return extract_response_text(response)
 
 
 async def _run_research_mode(

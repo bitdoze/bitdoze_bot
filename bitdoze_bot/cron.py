@@ -14,6 +14,7 @@ import yaml
 
 from bitdoze_bot.config import Config
 from bitdoze_bot.tool_permissions import tool_runtime_context
+from bitdoze_bot.utils import extract_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +137,8 @@ async def run_cron_job(
         except Exception:  # noqa: BLE001
             logger.exception("Cron job '%s' failed", job.name)
             return
-    content = getattr(response, "content", None) or str(response)
-    if job.deliver and send_fn is not None:
+    content = extract_response_text(response).strip()
+    if job.deliver and send_fn is not None and content:
         await send_fn(content)
 
 

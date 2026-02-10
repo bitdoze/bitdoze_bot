@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
 from bitdoze_bot.config import Config
-from bitdoze_bot.heartbeat import load_heartbeat_config, resolve_heartbeat_identity
+from bitdoze_bot.heartbeat import load_heartbeat_config, resolve_heartbeat_identity, run_heartbeat
 
 
 def test_load_heartbeat_config_defaults() -> None:
@@ -39,3 +40,19 @@ def test_resolve_heartbeat_identity_isolated() -> None:
     user_id, session_id = resolve_heartbeat_identity("isolated", now=now)
     assert user_id == "heartbeat:20260206T103000Z"
     assert session_id == "heartbeat:20260206T103000Z"
+
+
+def test_run_heartbeat_uses_reasoning_content_for_quiet_ack() -> None:
+    class DummyAgent:
+        name = "heartbeat"
+
+        def run(self, prompt: str, user_id: str, session_id: str):
+            return type("Resp", (), {"content": "", "reasoning_content": "HEARTBEAT_OK"})()
+
+    sent: list[str] = []
+
+    async def _send_fn(content: str) -> None:
+        sent.append(content)
+
+    asyncio.run(run_heartbeat(DummyAgent(), "ping", "HEARTBEAT_OK", _send_fn))
+    assert sent == []
