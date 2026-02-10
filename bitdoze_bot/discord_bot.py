@@ -32,6 +32,7 @@ from bitdoze_bot.heartbeat import (
     load_heartbeat_config,
     run_heartbeat,
 )
+from bitdoze_bot.run_monitor import RunMonitor
 from bitdoze_bot.tool_permissions import ToolPermissionError, tool_runtime_context
 from bitdoze_bot.utils import extract_response_text, parse_bool, read_text_if_exists
 
@@ -44,6 +45,12 @@ class RuntimeConfig:
     cron_timeout: int = 600
     heartbeat_timeout: int = 120
     max_concurrent_runs: int = 4
+    slow_run_threshold_seconds: int = 0
+    watchdog_enabled: bool = True
+    watchdog_threshold_seconds: int = 120
+    watchdog_max_reports: int = 5
+    fallback_denied_tools: tuple[str, ...] = ("shell", "discord")
+    monitor: RunMonitor | None = None
 
 
 def _safe_positive_int(value: Any, default: int) -> int:
@@ -57,11 +64,36 @@ def _safe_positive_int(value: Any, default: int) -> int:
 def load_runtime_config(config: Config) -> RuntimeConfig:
     raw = config.get("runtime", default={})
     cfg = raw if isinstance(raw, dict) else {}
+    monitoring_raw = config.get("monitoring", default={})
+    monitoring_cfg = monitoring_raw if isinstance(monitoring_raw, dict) else {}
+    fallback_raw = config.get("tool_fallback", default={})
+    fallback_cfg = fallback_raw if isinstance(fallback_raw, dict) else {}
+    denied_tools_cfg = fallback_cfg.get("denied_tools", ["shell", "discord"])
+    denied_tools: tuple[str, ...] = ("shell", "discord")
+    if isinstance(denied_tools_cfg, list):
+        normalized = [str(item).strip().lower() for item in denied_tools_cfg if str(item).strip()]
+        denied_tools = tuple(normalized)
+    monitor = RunMonitor(
+        enabled=parse_bool(monitoring_cfg.get("telemetry_enabled", True), True),
+        telemetry_path=str(monitoring_cfg.get("telemetry_path", "logs/run-telemetry.jsonl")),
+    )
     return RuntimeConfig(
         agent_timeout=_safe_positive_int(cfg.get("agent_timeout"), 600),
         cron_timeout=_safe_positive_int(cfg.get("cron_timeout"), 600),
         heartbeat_timeout=_safe_positive_int(cfg.get("heartbeat_timeout"), 120),
         max_concurrent_runs=_safe_positive_int(cfg.get("max_concurrent_runs"), 4),
+        slow_run_threshold_seconds=_parse_non_negative_int(cfg.get("slow_run_threshold_seconds", 0), 0),
+        watchdog_enabled=parse_bool(monitoring_cfg.get("watchdog_enabled", True), True),
+        watchdog_threshold_seconds=max(
+            _parse_non_negative_int(monitoring_cfg.get("watchdog_threshold_seconds", 120), 120),
+            1,
+        ),
+        watchdog_max_reports=max(
+            _parse_non_negative_int(monitoring_cfg.get("watchdog_max_reports", 5), 5),
+            1,
+        ),
+        fallback_denied_tools=denied_tools,
+        monitor=monitor,
     )
 
 
@@ -238,9 +270,44 @@ def _parse_agent_hint(content: str) -> tuple[str | None, str]:
 
 
 def _build_response_input(user_context: str | None, content: str) -> list[Message] | str:
+    file_task_hint = (
+        "For file and code operations, use the 'file' tool functions "
+        "(list_files, search_files, read_file, read_file_chunk, save_file, replace_file_chunk) "
+        "instead of shell commands."
+    )
+    lower_content = content.lower()
+    file_keywords = (
+        "file",
+        "folder",
+        "directory",
+        "read ",
+        "open ",
+        "edit ",
+        "update ",
+        "change ",
+        "rewrite ",
+        "search in",
+        "find in",
+        "codebase",
+        ".py",
+        ".js",
+        ".ts",
+        ".md",
+        ".yaml",
+        ".yml",
+        ".json",
+    )
+    needs_file_hint = any(token in lower_content for token in file_keywords)
+
     if user_context:
+        messages: list[Message] = [Message(role="system", content=user_context)]
+        if needs_file_hint:
+            messages.append(Message(role="system", content=file_task_hint))
+        messages.append(Message(role="user", content=content))
+        return messages
+    if needs_file_hint:
         return [
-            Message(role="system", content=user_context),
+            Message(role="system", content=file_task_hint),
             Message(role="user", content=content),
         ]
     return content
@@ -316,6 +383,15 @@ async def _run_agent(
     target_name = _agent_name(agent)
     target_kind = "team" if _is_team_target(agent) else "agent"
     members = _target_members(agent)
+    monitor_token = None
+    if cfg.monitor is not None:
+        monitor_token = cfg.monitor.start(
+            run_kind="discord",
+            target_name=target_name,
+            user_id=user_id,
+            session_id=session_id,
+            timeout_seconds=cfg.agent_timeout,
+        )
     logger.info(
         "Target run started kind=%s name=%s session_id=%s user_id=%s members=%s",
         target_kind,
@@ -325,16 +401,33 @@ async def _run_agent(
         ", ".join(members) if members else "none",
     )
     started_at = perf_counter()
-    async with _get_run_semaphore(cfg.max_concurrent_runs):
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                agent.run,
-                response_input,
-                user_id=user_id,
-                session_id=session_id,
-            ),
-            timeout=cfg.agent_timeout,
-        )
+    try:
+        async with _get_run_semaphore(cfg.max_concurrent_runs):
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    agent.run,
+                    response_input,
+                    user_id=user_id,
+                    session_id=session_id,
+                ),
+                timeout=cfg.agent_timeout,
+            )
+    except TimeoutError as exc:
+        if cfg.monitor is not None:
+            cfg.monitor.finish(
+                monitor_token,
+                status="timeout",
+                error=str(exc) or "agent timeout",
+            )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if cfg.monitor is not None:
+            cfg.monitor.finish(
+                monitor_token,
+                status="error",
+                error=str(exc),
+            )
+        raise
     elapsed_ms = int((perf_counter() - started_at) * 1000)
     run_id = getattr(response, "run_id", None)
     model = getattr(response, "model", None)
@@ -350,6 +443,20 @@ async def _run_agent(
         metrics or {},
         " | ".join(delegation_paths) if delegation_paths else "n/a",
     )
+    if cfg.monitor is not None:
+        cfg.monitor.finish(
+            monitor_token,
+            status="completed",
+            run_id=run_id,
+            model=model,
+            extra={
+                "target_kind": target_kind,
+                "members": members,
+                "elapsed_ms": elapsed_ms,
+                "metrics": metrics or {},
+                "delegation_paths": delegation_paths,
+            },
+        )
     return extract_response_text(response)
 
 
@@ -576,23 +683,31 @@ class DiscordAgentBot(commands.Bot):
                     user_context = _build_user_context(self.runtime.config, message)
                     rt_cfg = self.runtime.runtime_cfg
                     if research_mode_active:
-                        reply = await _run_research_mode(
-                            agent,
-                            content,
-                            user_context,
-                            user_id,
-                            session_id,
-                            research_cfg,
-                            rt_cfg,
+                        reply = await _await_with_slow_notice(
+                            _run_research_mode(
+                                agent,
+                                content,
+                                user_context,
+                                user_id,
+                                session_id,
+                                research_cfg,
+                                rt_cfg,
+                            ),
+                            message.channel,
+                            rt_cfg.slow_run_threshold_seconds,
                         )
                     else:
-                        reply = await _run_agent(
-                            agent,
-                            content,
-                            user_context,
-                            user_id,
-                            session_id,
-                            rt_cfg,
+                        reply = await _await_with_slow_notice(
+                            _run_agent(
+                                agent,
+                                content,
+                                user_context,
+                                user_id,
+                                session_id,
+                                rt_cfg,
+                            ),
+                            message.channel,
+                            rt_cfg.slow_run_threshold_seconds,
                         )
                         if "<tool_call>" in reply:
                             reply = await _handle_toolcall_fallback(agent, reply, rt_cfg)
@@ -638,6 +753,25 @@ class DiscordAgentBot(commands.Bot):
         async def send_fn(content: str) -> None:
             await _send_chunked(cast(discord.abc.Messageable, channel), content)
 
+        monitor = self.runtime.runtime_cfg.monitor
+        if self.runtime.runtime_cfg.watchdog_enabled and monitor is not None:
+            stale = monitor.stale_runs(
+                threshold_seconds=self.runtime.runtime_cfg.watchdog_threshold_seconds,
+                max_items=self.runtime.runtime_cfg.watchdog_max_reports,
+            )
+            if stale:
+                lines = [
+                    "Watchdog: long-running tasks detected:",
+                    *[
+                        (
+                            f"- `{item.target_name}` ({item.run_kind}) running for "
+                            f"{item.age_seconds}s in session `{item.session_id}`"
+                        )
+                        for item in stale
+                    ],
+                ]
+                await send_fn("\n".join(lines))
+
         await run_heartbeat(
             agent,
             prompt,
@@ -645,6 +779,7 @@ class DiscordAgentBot(commands.Bot):
             send_fn,
             session_scope=self.heartbeat_cfg.session_scope,
             timeout=self.runtime.runtime_cfg.heartbeat_timeout,
+            monitor=monitor,
         )
 
     def _configure_cron_jobs(self) -> None:
@@ -706,7 +841,13 @@ class DiscordAgentBot(commands.Bot):
             job.agent or self.runtime.agents.default_target,
         )
         agent = self.runtime.agents.get(job.agent)
-        await run_cron_job(agent, job, send_fn, timeout=self.runtime.runtime_cfg.cron_timeout)
+        await run_cron_job(
+            agent,
+            job,
+            send_fn,
+            timeout=self.runtime.runtime_cfg.cron_timeout,
+            monitor=self.runtime.runtime_cfg.monitor,
+        )
 
 
 async def _send_chunked(channel: discord.abc.Messageable, content: str) -> None:
@@ -729,29 +870,69 @@ async def _send_chunked(channel: discord.abc.Messageable, content: str) -> None:
         await channel.send(chunk)
 
 
+async def _await_with_slow_notice(
+    run_coro: Any,
+    channel: discord.abc.Messageable,
+    threshold_seconds: int,
+) -> str:
+    if threshold_seconds <= 0:
+        return await run_coro
+
+    task = asyncio.create_task(run_coro)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=threshold_seconds)
+    except TimeoutError:
+        await _send_chunked(
+            channel,
+            "Still working on this. It is taking longer than usual, I'll send the result when ready.",
+        )
+        return await task
+
+
 def _parse_tool_calls(text: str) -> list[dict[str, Any]]:
+    def _parse_param_value(raw: str) -> Any:
+        value = raw.strip()
+        if value.isdigit():
+            return int(value)
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+
     calls: list[dict[str, Any]] = []
     for block in re.findall(r"<tool_call>(.*?)</tool_call>", text, flags=re.DOTALL):
         func_match = re.search(r"<function=([a-zA-Z0-9_]+)>", block)
-        if not func_match:
-            continue
-        func_name = func_match.group(1)
+        if func_match:
+            func_name = func_match.group(1)
+        else:
+            # Supports plain style: <tool_call>fn_name<arg_key>..</arg_key>...</tool_call>
+            plain_name_match = re.match(r"\s*([a-zA-Z_][a-zA-Z0-9_]*)", block)
+            if not plain_name_match:
+                continue
+            func_name = plain_name_match.group(1)
         params: dict[str, Any] = {}
+
         for p_match in re.findall(r"<parameter=([a-zA-Z0-9_]+)>(.*?)</parameter>", block, flags=re.DOTALL):
             key = p_match[0]
-            value = p_match[1].strip()
-            if value.isdigit():
-                params[key] = int(value)
-            else:
-                try:
-                    params[key] = json.loads(value)
-                except Exception:
-                    params[key] = value
+            params[key] = _parse_param_value(p_match[1])
+
+        for p_match in re.finditer(
+            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>",
+            block,
+            flags=re.DOTALL,
+        ):
+            key = p_match.group(1).strip()
+            if not key:
+                continue
+            params[key] = _parse_param_value(p_match.group(2))
+
         calls.append({"name": func_name, "params": params})
     return calls
 
 
-_FALLBACK_DENIED_TOOLS: set[str] = {"shell", "discord"}
+def _strip_tool_call_markup(text: str) -> str:
+    cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL).strip()
+    return cleaned
 
 
 def _get_declared_functions(tool: Any) -> set[str]:
@@ -763,8 +944,13 @@ def _get_declared_functions(tool: Any) -> set[str]:
     return set()
 
 
-async def _run_tool_calls(agent, calls: list[dict[str, Any]]) -> list[dict[str, str]]:
+async def _run_tool_calls(
+    agent,
+    calls: list[dict[str, Any]],
+    denied_tools: set[str] | None = None,
+) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
+    denied = {"shell", "discord"} if denied_tools is None else denied_tools
     tools = getattr(agent, "tools", None) or []
     for call in calls:
         func_name = str(call.get("name", ""))
@@ -772,13 +958,26 @@ async def _run_tool_calls(agent, calls: list[dict[str, Any]]) -> list[dict[str, 
         target = None
         for tool in tools:
             tool_name = getattr(tool, "_bitdoze_tool_name", "") or ""
-            if tool_name.lower() in _FALLBACK_DENIED_TOOLS:
+            if tool_name.lower() in denied:
                 continue
-            declared = _get_declared_functions(tool)
+            get_functions = getattr(tool, "get_functions", None)
+            declared_funcs = get_functions() if callable(get_functions) else {}
+            if not isinstance(declared_funcs, dict):
+                declared_funcs = {}
+            declared = set(declared_funcs.keys())
             if declared and func_name not in declared:
                 continue
             if not declared:
                 continue
+
+            # Preferred: call the tool's declared function entrypoint directly.
+            declared_fn = declared_funcs.get(func_name)
+            entrypoint = getattr(declared_fn, "entrypoint", None)
+            if callable(entrypoint):
+                target = entrypoint
+                break
+
+            # Fallback: call method attribute by name when available.
             fn = getattr(tool, func_name, None)
             if callable(fn):
                 target = fn
@@ -792,7 +991,10 @@ async def _run_tool_calls(agent, calls: list[dict[str, Any]]) -> list[dict[str, 
             logger.error("Tool fallback: function '%s' failed: %s", func_name, exc)
             results.append({"name": func_name, "output": f"Error: {exc}"})
             continue
-        results.append({"name": func_name, "output": str(output)})
+        output_text = str(output).strip()
+        if not output_text:
+            output_text = "(no output)"
+        results.append({"name": func_name, "output": output_text})
     return results
 
 
@@ -803,16 +1005,53 @@ async def _handle_toolcall_fallback(
     calls = _parse_tool_calls(reply)
     if not calls:
         return reply
-    results = await _run_tool_calls(agent, calls)
+    results = await _run_tool_calls(agent, calls, denied_tools=set(cfg.fallback_denied_tools))
     if not results:
-        return reply
+        cleaned = _strip_tool_call_markup(reply)
+        if cleaned:
+            return (
+                f"{cleaned}\n\n"
+                "I could not execute that tool call in fallback mode."
+            )
+        return "I could not execute that tool call in fallback mode."
+    if all(item.get("output", "").strip() == "(no output)" for item in results):
+        names = ", ".join(item.get("name", "tool_call") for item in results)
+        return (
+            f"Executed tool call(s): {names}\n\n"
+            "The command completed but returned no output."
+        )
     prompt = "Summarize these tool results for Discord. Use bullets and include links when present.\n\n"
     for item in results:
         prompt += f"{item['name']}:\n{item['output']}\n\n"
-    response = await asyncio.wait_for(
-        asyncio.to_thread(agent.run, prompt, user_id="tool_fallback", session_id="tool_fallback"),
-        timeout=cfg.agent_timeout,
-    )
+    monitor_token = None
+    if cfg.monitor is not None:
+        monitor_token = cfg.monitor.start(
+            run_kind="discord_tool_fallback",
+            target_name=_agent_name(agent),
+            user_id="tool_fallback",
+            session_id="tool_fallback",
+            timeout_seconds=cfg.agent_timeout,
+        )
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(agent.run, prompt, user_id="tool_fallback", session_id="tool_fallback"),
+            timeout=cfg.agent_timeout,
+        )
+    except TimeoutError as exc:
+        if cfg.monitor is not None:
+            cfg.monitor.finish(monitor_token, status="timeout", error=str(exc) or "tool fallback timeout")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if cfg.monitor is not None:
+            cfg.monitor.finish(monitor_token, status="error", error=str(exc))
+        raise
+    if cfg.monitor is not None:
+        cfg.monitor.finish(
+            monitor_token,
+            status="completed",
+            run_id=getattr(response, "run_id", None),
+            model=getattr(response, "model", None),
+        )
     return extract_response_text(response)
 
 

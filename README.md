@@ -50,6 +50,9 @@ Edit `config.yaml`:
 - `model.structured_outputs`: set `false` for providers that reject response_format (e.g., StepFun/OpenRouter)
 - `discord`: bot token env var
 - `runtime`: timeouts for agent runs, cron, heartbeat, and max concurrency
+- `runtime.slow_run_threshold_seconds`: sends an interim "still working" reply when complex runs take longer than expected
+- `monitoring`: JSONL telemetry for runs + heartbeat watchdog alerts for long-running active tasks
+- `tool_fallback.denied_tools`: tool names blocked during XML-style fallback execution (default: `shell`, `discord`)
 - `logging`: set level, format, and rotating file settings from YAML
 - `research_mode`: enforce structured research responses and minimum source URLs
 - `tool_permissions`: runtime allow/deny rules for tool use plus JSONL audit logging
@@ -78,7 +81,7 @@ learning:
   stores:
     user_profile: true
     user_memory: true
-    session_context: true
+    session_context: always
 ```
 
 For each store, you can use:

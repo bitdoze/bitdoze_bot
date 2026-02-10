@@ -13,6 +13,17 @@ runtime:
     cron_timeout: 600 # seconds, max time for a cron job agent.run
     heartbeat_timeout: 120 # seconds, max time for a heartbeat agent.run
     max_concurrent_runs: 4 # max parallel agent.run calls
+    slow_run_threshold_seconds: 45 # send a "still working" message if a run exceeds this, 0 disables
+
+monitoring:
+    telemetry_enabled: true
+    telemetry_path: logs/run-telemetry.jsonl
+    watchdog_enabled: true # heartbeat reports active runs older than threshold
+    watchdog_threshold_seconds: 120
+    watchdog_max_reports: 5
+
+tool_fallback:
+    denied_tools: [shell, discord] # fallback parser-executed tools to block by name
 
 logging:
     level: INFO # DEBUG | INFO | WARNING | ERROR | CRITICAL
@@ -78,7 +89,7 @@ learning:
     stores:
         user_profile: true
         user_memory: true
-        session_context: false
+        session_context: always
         entity_memory: false
         learned_knowledge: false
         decision_log: false

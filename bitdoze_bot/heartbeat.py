@@ -9,6 +9,7 @@ from typing import Any, Callable, Awaitable
 from agno.agent import Agent
 
 from bitdoze_bot.config import Config
+from bitdoze_bot.run_monitor import RunMonitor
 from bitdoze_bot.tool_permissions import tool_runtime_context
 from bitdoze_bot.utils import extract_response_text, read_text_if_exists
 
@@ -89,10 +90,20 @@ async def run_heartbeat(
     send_fn: Callable[[str], Awaitable[None]],
     session_scope: str = "isolated",
     timeout: int | None = None,
+    monitor: RunMonitor | None = None,
 ) -> None:
     effective_timeout = timeout or _DEFAULT_HEARTBEAT_TIMEOUT
     user_id, session_id = resolve_heartbeat_identity(session_scope)
     agent_name = str(getattr(agent, "name", "unknown"))
+    monitor_token = None
+    if monitor is not None:
+        monitor_token = monitor.start(
+            run_kind="heartbeat",
+            target_name=agent_name,
+            user_id=user_id,
+            session_id=session_id,
+            timeout_seconds=effective_timeout,
+        )
     with tool_runtime_context(
         run_kind="heartbeat",
         user_id=user_id,
@@ -106,8 +117,21 @@ async def run_heartbeat(
             )
         except TimeoutError:
             logger.warning("Heartbeat run timed out after %ds", effective_timeout)
+            if monitor is not None:
+                monitor.finish(monitor_token, status="timeout", error="heartbeat timeout")
             return
+        except Exception as exc:  # noqa: BLE001
+            if monitor is not None:
+                monitor.finish(monitor_token, status="error", error=str(exc))
+            raise
     content = extract_response_text(response).strip()
+    if monitor is not None:
+        monitor.finish(
+            monitor_token,
+            status="completed",
+            run_id=getattr(response, "run_id", None),
+            model=getattr(response, "model", None),
+        )
     if not content:
         return
     if content.strip().startswith(quiet_ack):

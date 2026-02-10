@@ -1,5 +1,8 @@
-# MEMORY.md
 # MEMORY.md - Long-term Memory
+
+## Special Instructions
+
+- Use `FileTools` for file reads/edits instead of shell commands.
 
 ## User Profile
 - **Name**: Dragos

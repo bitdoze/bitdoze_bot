@@ -13,6 +13,17 @@ runtime:
     cron_timeout: 1600
     heartbeat_timeout: 120
     max_concurrent_runs: 4
+    slow_run_threshold_seconds: 120
+
+monitoring:
+    telemetry_enabled: true
+    telemetry_path: logs/run-telemetry.jsonl
+    watchdog_enabled: true
+    watchdog_threshold_seconds: 120
+    watchdog_max_reports: 5
+
+tool_fallback:
+    denied_tools: []
 
 logging:
     level: INFO # DEBUG | INFO | WARNING | ERROR | CRITICAL
@@ -66,7 +77,7 @@ learning:
     stores:
         user_profile: true
         user_memory: true
-        session_context: true
+        session_context: always
         entity_memory: false
         learned_knowledge: true
         decision_log: true
@@ -88,7 +99,7 @@ toolkits:
         languages: [en]
     file:
         enabled: true
-        base_dir: workspace
+        base_dir: /
     shell:
         enabled: true
         base_dir: workspace
@@ -124,6 +135,7 @@ agents:
     base_instructions: |
         You may be orchestrated inside teams. Delegate planning-heavy tasks to architect and
         implementation-heavy tasks to software-engineer when appropriate.
+        For file operations, prefer FileTools for reading and editing files.
     workspace_dir: workspace/agents
     aliases:
         engineer: software-engineer

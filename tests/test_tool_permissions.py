@@ -179,3 +179,4 @@ def test_audit_log_concurrent_writes_and_redaction(tmp_path: Path) -> None:
     assert all(item["tool"] == "shell" for item in entries)
     # include_arguments=true: token value must be redacted
     assert all(item.get("kwargs", {}).get("token") == "***REDACTED***" for item in entries)
+

@@ -6,6 +6,7 @@ from pathlib import Path
 from bitdoze_bot.config import Config
 from bitdoze_bot.discord_bot import (
     _collect_delegation_paths,
+    _build_response_input,
     _parse_agent_hint,
     _select_agent_name,
 )
@@ -74,3 +75,11 @@ def test_collect_delegation_paths() -> None:
     paths = _collect_delegation_paths(response)
     assert "delivery-team->architect" in paths
     assert "delivery-team->software-engineer" in paths
+
+
+def test_build_response_input_adds_file_hint_for_file_requests() -> None:
+    result = _build_response_input("CTX", "Please edit config.yaml and read README.md")
+    assert isinstance(result, list)
+    assert len(result) == 3
+    assert result[1].role == "system"
+    assert "use the 'file' tool functions" in (result[1].content or "")

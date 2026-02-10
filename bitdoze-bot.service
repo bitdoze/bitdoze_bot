@@ -5,6 +5,7 @@ After=network.target
 [Service]
 WorkingDirectory=/home/dragos/projects/bitdoze-bot
 ExecStart=/home/dragos/.local/bin/uv run main.py --config config.yaml
+SuccessExitStatus=143 SIGTERM
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

@@ -44,6 +44,7 @@ If you want to remember something, **write it to a file**. Don’t rely on “me
 - Skills follow Agno’s format (`SKILL.md` with YAML frontmatter).
 - When you need a tool, check the relevant skill first.
 - Keep machine-specific info in `workspace/TOOLS.md`.
+- Use `FileTools` for file reads/edits instead of shell commands.
 
 ## Heartbeat vs Cron
 
@@ -66,7 +67,8 @@ If you want to remember something, **write it to a file**. Don’t rely on “me
 - Config is `config.yaml`.
 - Env vars load from `.env` automatically.
 - Memory DB is `data/bitdoze.db`.
-- Base working directory for File/Shell tools is `workspace/`.
+- FileTools base directory is `/` (system-wide access).
+- Base working directory for Shell tools is `workspace/`.
 
 ## Make it yours
 

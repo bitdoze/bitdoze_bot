@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from bitdoze_bot.config import Config
+from bitdoze_bot.run_monitor import RunMonitor
 from bitdoze_bot.tool_permissions import tool_runtime_context
 from bitdoze_bot.utils import extract_response_text
 
@@ -109,12 +110,22 @@ async def run_cron_job(
     job: CronJobConfig,
     send_fn: Callable[[str], Awaitable[None]] | None,
     timeout: int | None = None,
+    monitor: RunMonitor | None = None,
 ) -> None:
     effective_timeout = timeout or _DEFAULT_CRON_TIMEOUT
     session_id = "cron:isolated"
     if job.session_scope == "main":
         session_id = "cron:main"
     agent_name = str(getattr(agent, "name", "unknown"))
+    monitor_token = None
+    if monitor is not None:
+        monitor_token = monitor.start(
+            run_kind="cron",
+            target_name=agent_name,
+            user_id="cron",
+            session_id=session_id,
+            timeout_seconds=effective_timeout,
+        )
     with tool_runtime_context(
         run_kind="cron",
         user_id="cron",
@@ -133,11 +144,22 @@ async def run_cron_job(
             )
         except TimeoutError:
             logger.warning("Cron job '%s' timed out after %ds", job.name, effective_timeout)
+            if monitor is not None:
+                monitor.finish(monitor_token, status="timeout", error="cron timeout")
             return
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            if monitor is not None:
+                monitor.finish(monitor_token, status="error", error=str(exc))
             logger.exception("Cron job '%s' failed", job.name)
             return
     content = extract_response_text(response).strip()
+    if monitor is not None:
+        monitor.finish(
+            monitor_token,
+            status="completed",
+            run_id=getattr(response, "run_id", None),
+            model=getattr(response, "model", None),
+        )
     if job.deliver and send_fn is not None and content:
         await send_fn(content)
 
