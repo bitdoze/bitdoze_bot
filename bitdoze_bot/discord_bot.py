@@ -407,6 +407,10 @@ def _select_agent_name(
 
 def _build_user_context(config: Config, message: discord.Message) -> str:
     context_cfg = config.get("context", default={})
+    use_workspace_context_files = bool(context_cfg.get("use_workspace_context_files", True))
+    if not use_workspace_context_files:
+        return ""
+
     user_path = context_cfg.get("user_path", "workspace/USER.md")
     memory_dir = Path(context_cfg.get("memory_dir", "workspace/memory"))
     long_memory_path = context_cfg.get("long_memory_path", "workspace/MEMORY.md")

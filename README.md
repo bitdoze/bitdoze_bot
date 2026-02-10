@@ -63,6 +63,7 @@ Edit `config.yaml`:
 - `agents`: define multiple agents, per-agent tool selections, and routing rules
 - `skills`: optional skill packs loaded from `skills/`
 - `context`: enable datetime injection and set timezone
+- `context.use_workspace_context_files`: when `false`, skip `USER.md`/daily logs/`MEMORY.md` injection and rely on Agno DB memory+learning only
 - `context.agents_path`: load workspace instructions into system context
 - `context.user_path` + `context.memory_dir` + `context.long_memory_path`: load USER + daily memory + long memory
 - `context.main_session_scope`: `dm_only` (default) or `always` for long memory
@@ -77,7 +78,7 @@ learning:
   stores:
     user_profile: true
     user_memory: true
-    session_context: false
+    session_context: true
 ```
 
 For each store, you can use:

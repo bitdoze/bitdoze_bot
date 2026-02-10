@@ -125,6 +125,7 @@ soul:
 context:
     add_datetime: true
     timezone_identifier: Europe/Bucharest
+    use_workspace_context_files: true
     agents_path: workspace/AGENTS.md
     user_path: workspace/USER.md
     memory_dir: workspace/memory

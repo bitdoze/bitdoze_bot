@@ -44,13 +44,13 @@ memory:
     mode: automatic
     db_file: data/bitdoze.db
     add_history_to_context: true
-    num_history_runs: 8
+    num_history_runs: 10
     read_chat_history: true
     search_session_history: true
-    num_history_sessions: 3
+    num_history_sessions: 5
     add_memories_to_context: true
-    enable_session_summaries: false
-    add_session_summary_to_context: false
+    enable_session_summaries: true
+    add_session_summary_to_context: true
     summary_prompt: |
         You are generating a session summary. Return ONLY a JSON object.
         Required keys:
@@ -61,15 +61,15 @@ memory:
 
 learning:
     enabled: true
-    mode: always # always | agentic | propose | hitl
+    mode: agentic # always | agentic | propose | hitl
     add_to_context: true
     stores:
         user_profile: true
         user_memory: true
-        session_context: false
+        session_context: true
         entity_memory: false
-        learned_knowledge: false
-        decision_log: false
+        learned_knowledge: true
+        decision_log: true
 
 toolkits:
     web_search:
@@ -113,6 +113,7 @@ soul:
 context:
     add_datetime: true
     timezone_identifier: Europe/Bucharest
+    use_workspace_context_files: false
     agents_path: workspace/AGENTS.md
     user_path: workspace/USER.md
     memory_dir: workspace/memory
@@ -141,8 +142,13 @@ agents:
                   shell,
                   discord,
               ]
-          skills: []
-          instructions: ""
+          skills: [docker-deploy]
+          instructions: |
+              Work like a learning-first agent:
+              1) Reuse prior session context, summaries, and learnings before answering.
+              2) When a fix works or a user corrects you, store it as a concise reusable learning.
+              3) Prefer insights and implications over raw outputs.
+              4) Avoid repeating failed approaches in the same thread.
         - name: research
           tools: [web_search, hackernews, website, github, youtube, file, shell]
           skills: [web-research]
