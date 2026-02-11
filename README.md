@@ -15,29 +15,45 @@ A Discord-first agent powered by Agno, with Web Search, Website Scraping, Local 
 - **Extensible**: add more agents and future skills in config
 
 ## Setup
-1) Create a config:
-
-```bash
-cp config.example.yaml config.yaml
-```
-
-2) Create a `.env` file:
-
-```bash
-cp .env.example .env
-# edit .env with your values
-```
-
-3) Install dependencies:
+1) Install dependencies:
 
 ```bash
 pip install agno discord.py pyyaml ddgs beautifulsoup4
 ```
 
-4) Run (auto-loads `.env` by default):
+2) Run the setup wizard:
 
 ```bash
-python main.py --config config.yaml
+python scripts/setup_bot.py
+```
+
+The wizard creates and updates `~/.bitdoze-bot/` (or `$BITDOZE_BOT_HOME`) with:
+- `config.yaml` (or existing `config.yml`)
+- `.env`
+- `workspace/` starter files (optional)
+- `workspace/agents/` starter agents (optional)
+- `bitdoze-bot.service` with your resolved paths
+- `skills/`
+- `logs/`
+- `data/`
+
+Wizard prompts:
+- Required in normal flow: Discord token value
+- Optional: GitHub token value
+- Optional: model/API settings (advanced prompt)
+- Optional: install service into `~/.config/systemd/user/bitdoze-bot.service`
+
+3) Review generated files:
+
+```bash
+$EDITOR ~/.bitdoze-bot/.env
+$EDITOR ~/.bitdoze-bot/config.yaml
+```
+
+4) Run the bot:
+
+```bash
+python main.py
 ```
 
 ## Discord Requirements
@@ -45,7 +61,10 @@ python main.py --config config.yaml
 - Invite the bot with the right permissions to post messages in your target channels.
 
 ## Configuration Overview
-Edit `config.yaml`:
+Edit `~/.bitdoze-bot/config.yaml` (or `config.yml` if that is your active file):
+- Relative paths are resolved from the config file location.
+- Override home location with `BITDOZE_BOT_HOME=/custom/path`.
+- Explicit overrides still work: `python main.py --config /path/config.yaml --env-file /path/.env`.
 - `model`: provider, model id, base URL, and API key env var
 - `model.structured_outputs`: set `false` for providers that reject response_format (e.g., StepFun/OpenRouter)
 - `discord`: bot token env var
@@ -176,6 +195,8 @@ Agents can be added without code changes using:
 - `workspace/agents/<agent-name>/agent.yaml`
 - `workspace/agents/<agent-name>/AGENTS.md`
 
+With the default home setup, these paths resolve under `~/.bitdoze-bot/workspace/agents/`.
+
 Example `agent.yaml`:
 
 ```yaml
@@ -239,7 +260,7 @@ logging:
 - Live tail:
 
 ```bash
-tail -f logs/bitdoze-bot.log
+tail -f ~/.bitdoze-bot/logs/bitdoze-bot.log
 ```
 
 ## Runtime Timeouts + Concurrency
@@ -261,7 +282,7 @@ runtime:
 
 ## How It Works
 Runtime flow:
-- On startup, the bot loads `config.yaml`, then builds global toolkits from `toolkits`.
+- On startup, the bot auto-loads `~/.bitdoze-bot/config.yaml` (legacy fallback: `config.yml`, then repo `config.yaml`), then builds global toolkits from `toolkits`.
 - It loads agents from:
   - `agents.definitions` in config
   - `workspace/agents/<name>/agent.yaml` (folder-based agents)
@@ -295,6 +316,8 @@ Add a new teammate:
 Skills follow Agno's skill structure (see Agno docs). Each skill lives in its own folder
 under `skills/` with a `SKILL.md` that includes YAML frontmatter (name/description).
 The agent loads skills via `LocalSkills`.
+
+With the default home setup, this resolves under `~/.bitdoze-bot/skills/`.
 
 To target specific skills per agent, set:
 

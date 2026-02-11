@@ -79,7 +79,7 @@ def build_logging_settings(config: Config) -> LoggingSettings:
     file_cfg = _as_mapping(logging_cfg.get("file", {}))
     file_settings = FileLoggingSettings(
         enabled=parse_bool(file_cfg.get("enabled", True), True),
-        path=Path(str(file_cfg.get("path", "logs/bitdoze-bot.log"))),
+        path=config.resolve_path(file_cfg.get("path"), default="logs/bitdoze-bot.log"),
         max_bytes=_parse_positive_int(file_cfg.get("max_bytes"), 10 * 1024 * 1024),
         backup_count=_parse_positive_int(file_cfg.get("backup_count"), 5),
     )

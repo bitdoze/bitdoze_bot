@@ -1,9 +1,12 @@
+# All relative paths are resolved from this config file's directory.
+# Default home setup uses ~/.bitdoze-bot/config.yml.
+
 model:
     provider: openai_like
     id: stepfun/step-3.5-flash:free
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENAI_API_KEY
-    structured_outputs: auto
+    structured_outputs: false
 
 discord:
     token_env: DISCORD_BOT_TOKEN

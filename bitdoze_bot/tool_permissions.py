@@ -141,7 +141,7 @@ def load_tool_audit_config(config: Config) -> ToolAuditConfig:
     redacted = _to_str_tuple(cfg.get("redacted_keys"))
     return ToolAuditConfig(
         enabled=parse_bool(cfg.get("enabled", True), True),
-        path=Path(str(cfg.get("path", "logs/tool-audit.jsonl"))),
+        path=config.resolve_path(cfg.get("path"), default="logs/tool-audit.jsonl"),
         include_arguments=parse_bool(cfg.get("include_arguments", False), False),
         redacted_keys=redacted
         or ("token", "secret", "password", "api_key", "authorization"),
@@ -179,6 +179,123 @@ def tool_runtime_context(
 
 def get_tool_runtime_context() -> ToolRuntimeContext:
     return _CURRENT_CONTEXT.get()
+
+
+def _strip_workspace_prefix(value: str) -> str:
+    normalized = value.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    while normalized.startswith("workspace/"):
+        normalized = normalized[len("workspace/") :]
+    if normalized == "workspace":
+        return "."
+    return normalized
+
+
+def _normalize_file_path_arg(raw_value: Any, tool_instance: Any) -> Any:
+    if not isinstance(raw_value, str):
+        return raw_value
+    value = raw_value.strip()
+    if not value:
+        return value
+
+    base_dir = getattr(tool_instance, "base_dir", None)
+    if isinstance(base_dir, Path):
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute():
+            try:
+                rel = candidate.resolve().relative_to(base_dir.resolve())
+                value = rel.as_posix() or "."
+            except ValueError:
+                return raw_value
+
+    return _strip_workspace_prefix(value)
+
+
+def _resolve_github_sha(
+    *,
+    tool_instance: Any,
+    repo_name: str,
+    path: str,
+    branch: str | None,
+) -> str | None:
+    github_client = getattr(tool_instance, "g", None)
+    if github_client is None:
+        return None
+    try:
+        repo = github_client.get_repo(repo_name)
+        file_obj = repo.get_contents(path, ref=branch) if branch else repo.get_contents(path)
+        if isinstance(file_obj, list):
+            return None
+        sha = getattr(file_obj, "sha", None)
+        if isinstance(sha, str):
+            clean_sha = sha.strip()
+            if clean_sha:
+                return clean_sha
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _normalize_tool_kwargs(
+    *,
+    tool_name: str,
+    function_name: str,
+    func: Callable[..., Any],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in kwargs.items():
+        clean_key = str(key).strip()
+        if not clean_key:
+            continue
+        normalized[clean_key] = value
+
+    tool_instance = getattr(func, "__self__", None)
+    tool_name_lower = tool_name.strip().lower()
+    function_name_lower = function_name.strip().lower()
+
+    if tool_name_lower == "file":
+        if "contents" not in normalized and "content" in normalized:
+            normalized["contents"] = normalized.pop("content")
+        if "file_name" in normalized:
+            normalized["file_name"] = _normalize_file_path_arg(
+                normalized["file_name"], tool_instance
+            )
+        if "directory" in normalized:
+            normalized["directory"] = _normalize_file_path_arg(
+                normalized["directory"], tool_instance
+            )
+        if "pattern" in normalized and isinstance(normalized["pattern"], str):
+            normalized["pattern"] = _strip_workspace_prefix(normalized["pattern"])
+
+    if tool_name_lower == "github":
+        if "repo_name" not in normalized and "repo" in normalized:
+            normalized["repo_name"] = normalized.pop("repo")
+        if "path" not in normalized and "file_name" in normalized:
+            normalized["path"] = normalized.pop("file_name")
+        if "content" not in normalized and "contents" in normalized:
+            normalized["content"] = normalized.pop("contents")
+        if function_name_lower == "update_file":
+            message = str(normalized.get("message", "")).strip()
+            if not message:
+                file_path = str(normalized.get("path", "")).strip() or "file"
+                normalized["message"] = f"Update {file_path} via bitdoze-bot"
+            sha = str(normalized.get("sha", "")).strip()
+            repo_name = str(normalized.get("repo_name", "")).strip()
+            path = str(normalized.get("path", "")).strip()
+            branch = str(normalized.get("branch", "")).strip() or None
+            if not sha and repo_name and path:
+                resolved_sha = _resolve_github_sha(
+                    tool_instance=tool_instance,
+                    repo_name=repo_name,
+                    path=path,
+                    branch=branch,
+                )
+                if resolved_sha:
+                    normalized["sha"] = resolved_sha
+
+    return normalized
 
 
 class ToolAuditLogger:
@@ -303,6 +420,12 @@ class ToolPermissionManager:
         @functools.wraps(func)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             agent_name = agent_name_getter()
+            normalized_kwargs = _normalize_tool_kwargs(
+                tool_name=tool_name,
+                function_name=function_name,
+                func=func,
+                kwargs=kwargs,
+            )
             decision = self.decide(agent_name=agent_name, tool_name=tool_name)
             if not decision.allowed:
                 self._audit.write(
@@ -311,7 +434,7 @@ class ToolPermissionManager:
                     function=function_name,
                     decision_reason=decision.reason,
                     args=args,
-                    kwargs=kwargs,
+                    kwargs=normalized_kwargs,
                 )
                 raise ToolPermissionError(
                     f"I can't use the '{tool_name}' tool in this context."
@@ -323,10 +446,10 @@ class ToolPermissionManager:
                 function=function_name,
                 decision_reason=decision.reason,
                 args=args,
-                kwargs=kwargs,
+                kwargs=normalized_kwargs,
             )
             try:
-                result = func(*args, **kwargs)
+                result = func(*args, **normalized_kwargs)
             except Exception as exc:  # noqa: BLE001
                 self._audit.write(
                     outcome="failed",
@@ -335,7 +458,7 @@ class ToolPermissionManager:
                     decision_reason=decision.reason,
                     error=f"{exc.__class__.__name__}: {exc}",
                     args=args,
-                    kwargs=kwargs,
+                    kwargs=normalized_kwargs,
                 )
                 raise
 
@@ -345,7 +468,7 @@ class ToolPermissionManager:
                 function=function_name,
                 decision_reason=decision.reason,
                 args=args,
-                kwargs=kwargs,
+                kwargs=normalized_kwargs,
             )
             return result
 

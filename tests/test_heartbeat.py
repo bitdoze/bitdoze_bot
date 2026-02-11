@@ -14,7 +14,7 @@ def test_load_heartbeat_config_defaults() -> None:
     assert hb.enabled is True
     assert hb.interval_minutes == 30
     assert hb.quiet_ack == "HEARTBEAT_OK"
-    assert hb.prompt_path == "workspace/HEARTBEAT.md"
+    assert hb.prompt_path == cfg.resolve_path(None, default="workspace/HEARTBEAT.md")
     assert hb.session_scope == "isolated"
     assert hb.agent is None
 

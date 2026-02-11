@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal, cast
 
 import yaml
@@ -121,10 +120,16 @@ def _build_tools(config: Config) -> dict[str, Any]:
 
     github_cfg = tool_cfg.get("github", {})
     if github_cfg.get("enabled", True):
-        token_env = github_cfg.get("token_env", "GITHUB_ACCESS_TOKEN")
-        access_token = os.getenv(token_env, "").strip() or None
+        token_env = str(github_cfg.get("token_env", "GITHUB_ACCESS_TOKEN") or "GITHUB_ACCESS_TOKEN")
+        access_token = os.getenv(token_env, "").strip()
         base_url = github_cfg.get("base_url")
-        tools["github"] = GithubTools(access_token=access_token, base_url=base_url)
+        if access_token:
+            tools["github"] = GithubTools(access_token=access_token, base_url=base_url)
+        else:
+            logger.warning(
+                "Github toolkit enabled but env var '%s' is empty; skipping github toolkit",
+                token_env,
+            )
 
     youtube_cfg = tool_cfg.get("youtube", {})
     if youtube_cfg.get("enabled", True):
@@ -133,13 +138,13 @@ def _build_tools(config: Config) -> dict[str, Any]:
 
     file_cfg = tool_cfg.get("file", {})
     if file_cfg.get("enabled", True):
-        base_dir = Path(file_cfg.get("base_dir", "workspace"))
+        base_dir = config.resolve_path(file_cfg.get("base_dir"), default="workspace")
         base_dir.mkdir(parents=True, exist_ok=True)
         tools["file"] = FileTools(base_dir=base_dir)
 
     shell_cfg = tool_cfg.get("shell", {})
     if shell_cfg.get("enabled", True):
-        base_dir = Path(shell_cfg.get("base_dir", "workspace"))
+        base_dir = config.resolve_path(shell_cfg.get("base_dir"), default="workspace")
         base_dir.mkdir(parents=True, exist_ok=True)
         tools["shell"] = ShellTools(base_dir=base_dir)
 
@@ -240,18 +245,21 @@ def _resolve_instructions(
     if base_instructions:
         instructions_parts.append(base_instructions)
 
-    agents_path = config.get("context", "agents_path", default="workspace/AGENTS.md")
+    agents_path = config.resolve_path(
+        config.get("context", "agents_path", default=None),
+        default="workspace/AGENTS.md",
+    )
     agents_text = read_text_if_exists(agents_path)
     if agents_text:
         instructions_parts.append("WORKSPACE AGENTS:\n" + agents_text)
 
-    soul_path = config.get("soul", "path", default="workspace/SOUL.md")
+    soul_path = config.resolve_path(config.get("soul", "path", default=None), default="workspace/SOUL.md")
     soul_text = read_text_if_exists(soul_path)
     if soul_text:
         instructions_parts.append("SOUL:\n" + soul_text)
 
     if agent_instructions_path:
-        agent_text = read_text_if_exists(agent_instructions_path)
+        agent_text = read_text_if_exists(config.resolve_path(agent_instructions_path))
         if agent_text:
             instructions_parts.append("AGENT INSTRUCTIONS:\n" + agent_text)
 
@@ -262,7 +270,10 @@ def _resolve_instructions(
 
 
 def _load_workspace_agent_definitions(config: Config) -> list[dict[str, Any]]:
-    workspace_dir = Path(config.get("agents", "workspace_dir", default="workspace/agents"))
+    workspace_dir = config.resolve_path(
+        config.get("agents", "workspace_dir", default=None),
+        default="workspace/agents",
+    )
     if not workspace_dir.exists():
         return []
 
@@ -399,7 +410,7 @@ def build_agents(config: Config) -> AgentRegistry:
 
     memory_cfg = config.get("memory", default={})
     db_file = memory_cfg.get("db_file", "data/bitdoze.db")
-    db_path = Path(db_file)
+    db_path = config.resolve_path(db_file, default="data/bitdoze.db")
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db = SqliteDb(db_file=str(db_path))
 
@@ -445,7 +456,7 @@ def build_agents(config: Config) -> AgentRegistry:
         skills_enabled = bool(skills_cfg.get("enabled", False))
         skills_loader = None
         if skills_enabled:
-            base_dirs = [Path(p) for p in skills_cfg.get("directories", [])]
+            base_dirs = [config.resolve_path(p) for p in skills_cfg.get("directories", [])]
             skill_names = list(agent_def.get("skills", []) or [])
             loaders: list[SkillLoader] = []
             if skill_names:

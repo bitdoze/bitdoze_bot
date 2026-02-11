@@ -6,7 +6,6 @@ import os
 import re
 from time import perf_counter
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
 from dataclasses import dataclass
@@ -75,7 +74,12 @@ def load_runtime_config(config: Config) -> RuntimeConfig:
         denied_tools = tuple(normalized)
     monitor = RunMonitor(
         enabled=parse_bool(monitoring_cfg.get("telemetry_enabled", True), True),
-        telemetry_path=str(monitoring_cfg.get("telemetry_path", "logs/run-telemetry.jsonl")),
+        telemetry_path=str(
+            config.resolve_path(
+                monitoring_cfg.get("telemetry_path"),
+                default="logs/run-telemetry.jsonl",
+            )
+        ),
     )
     return RuntimeConfig(
         agent_timeout=_safe_positive_int(cfg.get("agent_timeout"), 600),
@@ -271,9 +275,10 @@ def _parse_agent_hint(content: str) -> tuple[str | None, str]:
 
 def _build_response_input(user_context: str | None, content: str) -> list[Message] | str:
     file_task_hint = (
-        "For file and code operations, use the 'file' tool functions "
+        "For local file/code operations, use the 'file' tool functions "
         "(list_files, search_files, read_file, read_file_chunk, save_file, replace_file_chunk) "
-        "instead of shell commands."
+        "instead of shell or github tools. File paths are relative to the workspace root, "
+        "so use 'USER.md' (not 'workspace/USER.md'). Use save_file(contents=..., file_name=...)."
     )
     lower_content = content.lower()
     file_keywords = (
@@ -518,9 +523,12 @@ def _build_user_context(config: Config, message: discord.Message) -> str:
     if not use_workspace_context_files:
         return ""
 
-    user_path = context_cfg.get("user_path", "workspace/USER.md")
-    memory_dir = Path(context_cfg.get("memory_dir", "workspace/memory"))
-    long_memory_path = context_cfg.get("long_memory_path", "workspace/MEMORY.md")
+    user_path = config.resolve_path(context_cfg.get("user_path"), default="workspace/USER.md")
+    memory_dir = config.resolve_path(context_cfg.get("memory_dir"), default="workspace/memory")
+    long_memory_path = config.resolve_path(
+        context_cfg.get("long_memory_path"),
+        default="workspace/MEMORY.md",
+    )
     main_session_scope = context_cfg.get("main_session_scope", "dm_only")
     tz_name = context_cfg.get("timezone_identifier", "UTC")
 

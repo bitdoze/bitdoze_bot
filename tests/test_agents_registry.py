@@ -251,3 +251,64 @@ agents:
     tools = getattr(architect, "tools", None) or []
     assert len(tools) == 1
     assert isinstance(tools[0], HackerNewsTools)
+
+
+def test_github_tool_missing_token_is_skipped(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TEST_MODEL_KEY", "test-key")
+    monkeypatch.delenv("MISSING_GH_TOKEN", raising=False)
+
+    config_path = tmp_path / "config.yaml"
+    db_file = tmp_path / "data" / "bot.db"
+    config_path.write_text(
+        f"""
+model:
+  provider: openai_like
+  id: test-model
+  base_url: https://example.test/v1
+  api_key_env: TEST_MODEL_KEY
+  structured_outputs: off
+
+memory:
+  db_file: {db_file}
+  mode: automatic
+  add_history_to_context: false
+  read_chat_history: false
+  search_session_history: false
+  add_memories_to_context: false
+  enable_session_summaries: false
+  add_session_summary_to_context: false
+
+learning:
+  enabled: false
+
+toolkits:
+  web_search: {{ enabled: false }}
+  hackernews: {{ enabled: false }}
+  website: {{ enabled: false }}
+  github:
+    enabled: true
+    token_env: MISSING_GH_TOKEN
+  youtube: {{ enabled: false }}
+  file: {{ enabled: false }}
+  shell: {{ enabled: false }}
+  discord: {{ enabled: false }}
+
+context:
+  add_datetime: false
+
+skills:
+  enabled: false
+
+agents:
+  workspace_dir: {tmp_path / "workspace" / "agents"}
+  definitions:
+    - name: main
+  default: main
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = build_agents(load_config(config_path))
+    main_agent = registry.get("main")
+    tools = getattr(main_agent, "tools", None) or []
+    assert tools == []

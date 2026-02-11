@@ -39,7 +39,7 @@ def test_build_logging_settings_defaults_when_section_missing() -> None:
     assert settings.level_fallback_used is False
     assert settings.fmt == DEFAULT_FORMATS["detailed"]
     assert settings.file.enabled is True
-    assert settings.file.path == Path("logs/bitdoze-bot.log")
+    assert settings.file.path == config.resolve_path(None, default="logs/bitdoze-bot.log")
     assert settings.file.max_bytes == 10 * 1024 * 1024
     assert settings.file.backup_count == 5
 

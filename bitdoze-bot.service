@@ -4,12 +4,13 @@ After=network.target
 
 [Service]
 WorkingDirectory=/home/dragos/projects/bitdoze-bot
-ExecStart=/home/dragos/.local/bin/uv run main.py --config config.yaml
+ExecStart=/home/dragos/.local/bin/uv run main.py
 SuccessExitStatus=143 SIGTERM
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/home/dragos/projects/bitdoze-bot/.env
+Environment=BITDOZE_BOT_HOME=/home/dragos/.bitdoze-bot
+EnvironmentFile=/home/dragos/.bitdoze-bot/.env
 
 [Install]
 WantedBy=default.target

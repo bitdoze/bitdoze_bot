@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from agno.agent import Agent
@@ -23,7 +24,7 @@ class HeartbeatConfig:
     enabled: bool
     interval_minutes: int
     quiet_ack: str
-    prompt_path: str
+    prompt_path: Path
     session_scope: str
     agent: str | None
     channel_id: int | None
@@ -57,7 +58,7 @@ def load_heartbeat_config(config: Config) -> HeartbeatConfig:
         enabled=bool(hb_cfg.get("enabled", True)),
         interval_minutes=_safe_positive_int(hb_cfg.get("interval_minutes", 30), 30),
         quiet_ack=str(hb_cfg.get("quiet_ack", "HEARTBEAT_OK")),
-        prompt_path=str(hb_cfg.get("prompt_path", "workspace/HEARTBEAT.md")),
+        prompt_path=config.resolve_path(hb_cfg.get("prompt_path"), default="workspace/HEARTBEAT.md"),
         session_scope=session_scope,
         agent=agent,
         channel_id=channel_id,

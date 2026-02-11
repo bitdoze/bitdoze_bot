@@ -41,12 +41,14 @@ class CronConfig:
 
 
 def load_cron_config(config: Config) -> CronConfig:
-    cron_cfg = config.get("cron", default={})
-    cron_path = cron_cfg.get("path")
-    if cron_path:
+    raw = config.get("cron", default={})
+    cron_cfg = raw if isinstance(raw, dict) else {}
+    cron_path_value = cron_cfg.get("path")
+    if cron_path_value:
+        cron_path = config.resolve_path(cron_path_value)
         try:
-            raw = Path(cron_path).read_text(encoding="utf-8")
-            loaded = yaml.safe_load(raw) or {}
+            loaded_raw = cron_path.read_text(encoding="utf-8")
+            loaded = yaml.safe_load(loaded_raw) or {}
             if isinstance(loaded, dict):
                 cron_cfg = loaded
         except FileNotFoundError:
@@ -179,5 +181,5 @@ def build_cron_trigger(cron_expr: str, tz: str) -> CronTrigger | None:
 
 def get_cron_path(config: Config) -> Path:
     cron_cfg = config.get("cron", default={})
-    cron_path = cron_cfg.get("path", "workspace/CRON.yaml")
-    return Path(cron_path)
+    cron_path = cron_cfg.get("path")
+    return config.resolve_path(cron_path, default="workspace/CRON.yaml")
