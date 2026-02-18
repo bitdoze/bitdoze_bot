@@ -18,11 +18,14 @@ from agno.learn import (
     UserMemoryConfig,
     UserProfileConfig,
 )
+from agno.knowledge import Knowledge
+from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.models.openai.like import OpenAILike
 from agno.session import SessionSummaryManager
 from agno.skills import LocalSkills, SkillLoader, Skills
 from agno.team import Team
 from agno.tools.discord import DiscordTools
+from agno.tools.reddit import RedditTools
 from agno.tools.file import FileTools
 from agno.tools.github import GithubTools
 from agno.tools.hackernews import HackerNewsTools
@@ -32,6 +35,7 @@ from agno.tools.website import WebsiteTools
 from agno.tools.youtube import YouTubeTools
 
 from bitdoze_bot.config import Config
+from bitdoze_bot.discovery_tools import DiscoveryTools
 from bitdoze_bot.tool_permissions import ToolPermissionManager, get_tool_runtime_context
 from bitdoze_bot.utils import read_text_if_exists
 
@@ -147,6 +151,37 @@ def _build_tools(config: Config) -> dict[str, Any]:
         base_dir = config.resolve_path(shell_cfg.get("base_dir"), default="workspace")
         base_dir.mkdir(parents=True, exist_ok=True)
         tools["shell"] = ShellTools(base_dir=base_dir)
+
+    reddit_cfg = tool_cfg.get("reddit", {})
+    if reddit_cfg.get("enabled", False):
+        reddit_kwargs: dict[str, Any] = {}
+        client_id_env = str(reddit_cfg.get("client_id_env", "REDDIT_CLIENT_ID") or "REDDIT_CLIENT_ID")
+        client_secret_env = str(reddit_cfg.get("client_secret_env", "REDDIT_CLIENT_SECRET") or "REDDIT_CLIENT_SECRET")
+        client_id = os.getenv(client_id_env, "").strip()
+        client_secret = os.getenv(client_secret_env, "").strip()
+        if client_id:
+            reddit_kwargs["client_id"] = client_id
+        if client_secret:
+            reddit_kwargs["client_secret"] = client_secret
+        user_agent = reddit_cfg.get("user_agent")
+        if user_agent:
+            reddit_kwargs["user_agent"] = user_agent
+        username_env = str(reddit_cfg.get("username_env", "REDDIT_USERNAME") or "REDDIT_USERNAME")
+        password_env = str(reddit_cfg.get("password_env", "REDDIT_PASSWORD") or "REDDIT_PASSWORD")
+        username = os.getenv(username_env, "").strip()
+        password = os.getenv(password_env, "").strip()
+        if username:
+            reddit_kwargs["username"] = username
+        if password:
+            reddit_kwargs["password"] = password
+        if client_id and client_secret:
+            tools["reddit"] = RedditTools(**reddit_kwargs)
+        else:
+            logger.warning(
+                "Reddit toolkit enabled but env vars '%s' / '%s' are empty; skipping reddit toolkit",
+                client_id_env,
+                client_secret_env,
+            )
 
     discord_cfg = tool_cfg.get("discord", {})
     if discord_cfg.get("enabled", True):
@@ -398,6 +433,88 @@ def _coerce_debug_level(value: Any, default: Literal[1, 2] = 1) -> Literal[1, 2]
     return default
 
 
+def _build_knowledge(config: Config) -> tuple[Any, Any]:
+    """Build knowledge base and learnings knowledge from config.
+
+    Returns (knowledge, learnings_knowledge) — either may be None.
+    """
+    kb_cfg = config.get("knowledge", default={}) or {}
+    if not kb_cfg.get("enabled", False):
+        return None, None
+
+    backend = str(kb_cfg.get("backend", "lancedb")).lower()
+    embedder_id = kb_cfg.get("embedder", "text-embedding-3-small")
+    embedder = OpenAIEmbedder(id=embedder_id)
+    logger.info(
+        "Knowledge enabled backend=%s embedder=%s table=%s learnings_table=%s",
+        backend,
+        embedder_id,
+        kb_cfg.get("table_name", "bitdoze_knowledge"),
+        kb_cfg.get("learnings_table_name", "bitdoze_learnings"),
+    )
+
+    if backend == "pgvector":
+        try:
+            from agno.vectordb.pgvector import PgVector, SearchType
+        except ImportError:
+            logger.warning("pgvector not installed; skipping knowledge base")
+            return None, None
+        db_url = kb_cfg.get("db_url") or os.getenv("PGVECTOR_DB_URL", "")
+        if not db_url:
+            logger.warning("knowledge.db_url not set; skipping knowledge base")
+            return None, None
+        db_target = db_url.split("@")[-1] if "@" in db_url else db_url
+        logger.info("Knowledge pgvector target=%s", db_target)
+        knowledge = Knowledge(
+            name="Bitdoze Knowledge",
+            vector_db=PgVector(
+                db_url=db_url,
+                table_name=kb_cfg.get("table_name", "bitdoze_knowledge"),
+                search_type=SearchType.hybrid,
+                embedder=embedder,
+            ),
+        )
+        learnings = Knowledge(
+            name="Bitdoze Learnings",
+            vector_db=PgVector(
+                db_url=db_url,
+                table_name=kb_cfg.get("learnings_table_name", "bitdoze_learnings"),
+                search_type=SearchType.hybrid,
+                embedder=embedder,
+            ),
+        )
+    else:
+        try:
+            from agno.vectordb.lancedb import LanceDb, SearchType
+        except ImportError:
+            logger.warning("lancedb not installed; skipping knowledge base")
+            return None, None
+        lance_uri = str(
+            config.resolve_path(kb_cfg.get("lance_uri"), default="data/lancedb")
+        )
+        logger.info("Knowledge lancedb uri=%s", lance_uri)
+        knowledge = Knowledge(
+            name="Bitdoze Knowledge",
+            vector_db=LanceDb(
+                uri=lance_uri,
+                table_name=kb_cfg.get("table_name", "bitdoze_knowledge"),
+                search_type=SearchType.hybrid,
+                embedder=embedder,
+            ),
+        )
+        learnings = Knowledge(
+            name="Bitdoze Learnings",
+            vector_db=LanceDb(
+                uri=lance_uri,
+                table_name=kb_cfg.get("learnings_table_name", "bitdoze_learnings"),
+                search_type=SearchType.hybrid,
+                embedder=embedder,
+            ),
+        )
+
+    return knowledge, learnings
+
+
 def build_agents(config: Config) -> AgentRegistry:
     tools = _build_tools(config)
     permission_manager = ToolPermissionManager.from_config(config)
@@ -416,6 +533,20 @@ def build_agents(config: Config) -> AgentRegistry:
 
     add_datetime = bool(config.get("context", "add_datetime", default=True))
     timezone_identifier = config.get("context", "timezone_identifier", default=None)
+
+    knowledge, learnings_knowledge = _build_knowledge(config)
+    discovery_tools: DiscoveryTools | None = None
+    if learnings_knowledge is not None:
+        kb_cfg = config.get("knowledge", default={}) or {}
+        discovery_tools = DiscoveryTools(
+            knowledge=learnings_knowledge,
+            embedder_id=str(kb_cfg.get("embedder", "text-embedding-3-small")),
+        )
+        tools["discoveries"] = permission_manager.wrap_tool(
+            tool=discovery_tools,
+            tool_name="discoveries",
+            agent_name_getter=lambda: get_tool_runtime_context().agent_name or "unknown",
+        )
 
     agents_cfg = config.get("agents", default={})
     configured_defs = agents_cfg.get("definitions", []) or []
@@ -482,6 +613,8 @@ def build_agents(config: Config) -> AgentRegistry:
             tools=agent_tools,
             instructions=instructions or None,
             db=db,
+            knowledge=knowledge,
+            search_knowledge=knowledge is not None,
             markdown=True,
             update_memory_on_run=(mem_options["memory_mode"] == "automatic"),
             enable_agentic_memory=(mem_options["memory_mode"] == "agentic"),

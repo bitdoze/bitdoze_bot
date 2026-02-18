@@ -74,6 +74,7 @@ class RunMonitor:
         run_id: str | None = None,
         model: str | None = None,
         error: str | None = None,
+        metrics: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
         if token is None:
@@ -98,6 +99,11 @@ class RunMonitor:
             "model": model,
             "error": error,
         }
+        if metrics:
+            event["metrics"] = metrics
+            for key in ("input_tokens", "output_tokens", "total_tokens"):
+                if key in metrics and metrics[key] is not None:
+                    event[key] = metrics[key]
         if extra:
             event["extra"] = extra
         self._append_event(event)

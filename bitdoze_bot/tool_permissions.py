@@ -207,7 +207,12 @@ def _normalize_file_path_arg(raw_value: Any, tool_instance: Any) -> Any:
                 rel = candidate.resolve().relative_to(base_dir.resolve())
                 value = rel.as_posix() or "."
             except ValueError:
-                return raw_value
+                # Treat root-style paths as workspace-root-relative when the tool
+                # is sandboxed to a non-root base directory.
+                if str(base_dir.resolve()) != "/" and value.startswith("/"):
+                    value = value.lstrip("/")
+                else:
+                    return raw_value
 
     return _strip_workspace_prefix(value)
 

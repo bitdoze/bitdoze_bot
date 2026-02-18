@@ -17,6 +17,8 @@ runtime:
     heartbeat_timeout: 120 # seconds, max time for a heartbeat agent.run
     max_concurrent_runs: 4 # max parallel agent.run calls
     slow_run_threshold_seconds: 45 # send a "still working" message if a run exceeds this, 0 disables
+    streaming_enabled: true # stream responses to Discord (edit message as content arrives)
+    streaming_edit_interval: 1.5 # seconds between Discord message edits during streaming
 
 monitoring:
     telemetry_enabled: true
@@ -70,7 +72,7 @@ memory:
     mode: automatic
     db_file: data/bitdoze.db
     add_history_to_context: true
-    num_history_runs: 8
+    num_history_runs: 5
     read_chat_history: true
     search_session_history: true
     num_history_sessions: 3
@@ -82,8 +84,21 @@ memory:
         Required keys:
           - summary: string (required, must be present)
           - topics: array of strings (optional)
+          - decisions: array of strings — key decisions made (optional)
+          - unresolved: array of strings — open questions (optional)
         Use lowercase keys exactly as shown. Do not add extra keys or prose.
     summary_request_message: "Return JSON only. Include the required key: summary."
+
+knowledge:
+    enabled: false # set to true after running setup_knowledge.py
+    backend: lancedb # lancedb (file-based, no docker) or pgvector (requires PostgreSQL)
+    embedder: text-embedding-3-small
+    # LanceDb settings (used when backend=lancedb)
+    lance_uri: data/lancedb
+    table_name: bitdoze_knowledge
+    learnings_table_name: bitdoze_learnings
+    # PgVector settings (used when backend=pgvector)
+    db_url: null # or set PGVECTOR_DB_URL env var; e.g. postgresql+psycopg://bitdoze:bitdoze_secret@localhost:5532/bitdoze
 
 learning:
     enabled: true
@@ -94,7 +109,7 @@ learning:
         user_memory: true
         session_context: always
         entity_memory: false
-        learned_knowledge: false
+        learned_knowledge: agentic # agent decides when to save/search learnings
         decision_log: false
 
 toolkits:
@@ -118,6 +133,13 @@ toolkits:
     shell:
         enabled: false
         base_dir: workspace
+    reddit:
+        enabled: false
+        client_id_env: REDDIT_CLIENT_ID
+        client_secret_env: REDDIT_CLIENT_SECRET
+        username_env: REDDIT_USERNAME
+        password_env: REDDIT_PASSWORD
+        user_agent: null
     discord:
         enabled: true
 
@@ -167,11 +189,12 @@ agents:
                   file,
                   shell,
                   discord,
+                  discoveries,
               ]
           skills: []
           instructions: ""
         - name: research
-          tools: [web_search, hackernews, website, github, youtube, file, shell]
+          tools: [web_search, hackernews, website, github, youtube, file, shell, discoveries]
           skills: [web-research]
           instructions: ""
         - name: heartbeat

@@ -141,6 +141,8 @@ class SetupAnswers:
     service_workdir: Path | None
     install_user_service: bool
     service_user_dir: Path | None
+    setup_pgvector: bool = False
+    knowledge_backend: str = "lancedb"
 
 
 def _repo_root() -> Path:
@@ -329,6 +331,53 @@ def _create_workspace_files(home_dir: Path) -> None:
         _write_if_missing(workspace_dir / filename, content)
 
 
+def _setup_pgvector_docker(home_dir: Path) -> None:
+    """Start PgVector via docker compose using the project's docker-compose.yml."""
+    import os
+    import shutil
+    import subprocess
+
+    compose_file = _repo_root() / "docker-compose.yml"
+    if not compose_file.exists():
+        print("WARNING: docker-compose.yml not found, skipping PgVector setup")
+        return
+
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        print("WARNING: docker not found in PATH, skipping PgVector setup")
+        print(f"  Run manually: docker compose -f {compose_file} up -d")
+        return
+
+    pgdata_dir = home_dir / "data" / "pgdata"
+    pgdata_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Starting PgVector (data at {pgdata_dir})...")
+    docker_cmd = [docker_bin, "compose", "-f", str(compose_file), "up", "-d"]
+    docker_sock = Path("/var/run/docker.sock")
+    should_use_sudo = (
+        os.geteuid() != 0 and docker_sock.exists() and not os.access(docker_sock, os.W_OK)
+    )
+    if should_use_sudo:
+        sudo_bin = shutil.which("sudo")
+        if sudo_bin:
+            print("Docker socket requires elevated permissions; retrying with sudo...")
+            docker_cmd = [sudo_bin, *docker_cmd]
+        else:
+            print("WARNING: Docker socket needs elevated permissions but sudo was not found")
+            print(f"  Run manually: sudo docker compose -f {compose_file} up -d")
+            return
+
+    try:
+        subprocess.run(
+            docker_cmd,
+            check=True,
+            timeout=120,
+        )
+        print("PgVector started successfully on port 5532")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"WARNING: Failed to start PgVector: {exc}")
+        print(f"  Run manually: docker compose -f {compose_file} up -d")
+
+
 def _create_workspace_agents(
     home_dir: Path,
     model_id: str | None,
@@ -427,6 +476,12 @@ def _apply_answers_to_config(config: dict[str, Any], answers: SetupAnswers) -> d
     if not answers.create_workspace_agents:
         _remove_delivery_team_references(updated)
 
+    # Knowledge base settings
+    _set_nested(updated, ("knowledge", "backend"), answers.knowledge_backend)
+    if answers.setup_pgvector:
+        _set_nested(updated, ("knowledge", "enabled"), True)
+        _set_nested(updated, ("knowledge", "backend"), "pgvector")
+
     return updated
 
 
@@ -468,6 +523,10 @@ def run_setup(answers: SetupAnswers) -> list[Path]:
     ):
         env_updates[answers.model_api_key_env] = answers.model_api_key_value
     _write_env_file(answers.env_path, env_updates)
+
+    # Setup PgVector Docker if requested
+    if answers.setup_pgvector:
+        _setup_pgvector_docker(answers.home_dir)
 
     if answers.configure_service:
         return _write_systemd_service_files(answers)
@@ -575,6 +634,21 @@ def _interactive_answers(home_dir_override: str | None = None) -> SetupAnswers:
         if install_user_service:
             service_user_dir = Path("~/.config/systemd/user").expanduser()
 
+    setup_pgvector = _prompt_yes_no(
+        "Setup PostgreSQL + PgVector via Docker (for knowledge base)",
+        default=False,
+    )
+    knowledge_backend = "lancedb"
+    if setup_pgvector:
+        knowledge_backend = "pgvector"
+    else:
+        use_knowledge = _prompt_yes_no(
+            "Enable knowledge base with LanceDb (file-based, no Docker needed)",
+            default=False,
+        )
+        if use_knowledge:
+            knowledge_backend = "lancedb"
+
     return SetupAnswers(
         home_dir=home_dir,
         config_path=config_path,
@@ -596,6 +670,8 @@ def _interactive_answers(home_dir_override: str | None = None) -> SetupAnswers:
         service_workdir=service_workdir,
         install_user_service=install_user_service,
         service_user_dir=service_user_dir,
+        setup_pgvector=setup_pgvector,
+        knowledge_backend=knowledge_backend,
     )
 
 
@@ -630,6 +706,8 @@ def _defaults_answers(home_dir_override: str | None = None) -> SetupAnswers:
         service_workdir=_repo_root(),
         install_user_service=True,
         service_user_dir=Path("~/.config/systemd/user").expanduser(),
+        setup_pgvector=False,
+        knowledge_backend="lancedb",
     )
 
 

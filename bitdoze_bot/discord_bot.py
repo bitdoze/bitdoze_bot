@@ -14,7 +14,7 @@ from typing import Any, cast
 import discord
 from discord.ext import commands, tasks
 
-from agno.run.agent import Message
+from agno.run.agent import Message, RunEvent, RunContentEvent, RunOutput
 from agno.team import Team
 
 from bitdoze_bot.agents import AgentRegistry, build_agents
@@ -45,6 +45,8 @@ class RuntimeConfig:
     heartbeat_timeout: int = 120
     max_concurrent_runs: int = 4
     slow_run_threshold_seconds: int = 0
+    streaming_enabled: bool = True
+    streaming_edit_interval: float = 1.5
     watchdog_enabled: bool = True
     watchdog_threshold_seconds: int = 120
     watchdog_max_reports: int = 5
@@ -87,6 +89,8 @@ def load_runtime_config(config: Config) -> RuntimeConfig:
         heartbeat_timeout=_safe_positive_int(cfg.get("heartbeat_timeout"), 120),
         max_concurrent_runs=_safe_positive_int(cfg.get("max_concurrent_runs"), 4),
         slow_run_threshold_seconds=_parse_non_negative_int(cfg.get("slow_run_threshold_seconds", 0), 0),
+        streaming_enabled=parse_bool(cfg.get("streaming_enabled", True), True),
+        streaming_edit_interval=max(float(cfg.get("streaming_edit_interval", 1.5) or 1.5), 0.5),
         watchdog_enabled=parse_bool(monitoring_cfg.get("watchdog_enabled", True), True),
         watchdog_threshold_seconds=max(
             _parse_non_negative_int(monitoring_cfg.get("watchdog_threshold_seconds", 120), 120),
@@ -332,18 +336,126 @@ def _target_members(target: Any) -> list[str]:
 def _extract_metrics(metrics: Any) -> dict[str, Any]:
     if metrics is None:
         return {}
-    snapshot: dict[str, Any] = {}
-    for key in (
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "latency",
-        "time_to_first_token",
-    ):
-        value = getattr(metrics, key, None)
+    # RunOutput carries primary metrics on `.metrics`; extract from there first.
+    if not isinstance(metrics, dict):
+        nested_metrics = getattr(metrics, "metrics", None)
+        if nested_metrics is not None and nested_metrics is not metrics:
+            snapshot = _extract_metrics(nested_metrics)
+        else:
+            snapshot = {}
+    else:
+        snapshot = {}
+
+    # Aggregate token usage across model requests when available (useful for
+    # streaming + tool calls where final response metrics may be partial/missing).
+    events = getattr(metrics, "events", None)
+    if isinstance(events, list):
+        input_sum = 0
+        output_sum = 0
+        total_sum = 0
+        seen = False
+        for event in events:
+            in_tok = getattr(event, "input_tokens", None)
+            out_tok = getattr(event, "output_tokens", None)
+            tot_tok = getattr(event, "total_tokens", None)
+            if in_tok is None and out_tok is None and tot_tok is None:
+                continue
+            seen = True
+            input_sum += int(in_tok or 0)
+            output_sum += int(out_tok or 0)
+            total_sum += int(tot_tok or 0)
+        if seen:
+            if input_sum > 0:
+                snapshot["input_tokens"] = input_sum
+            if output_sum > 0:
+                snapshot["output_tokens"] = output_sum
+            if total_sum > 0:
+                snapshot["total_tokens"] = total_sum
+            snapshot["token_source"] = "events"
+
+    usage = getattr(metrics, "usage", None)
+    if isinstance(metrics, dict):
+        usage = metrics.get("usage", usage)
+        provider_data = metrics.get("model_provider_data")
+    else:
+        provider_data = getattr(metrics, "model_provider_data", None)
+    if isinstance(provider_data, dict):
+        usage = provider_data.get("usage", usage)
+        if usage is None and isinstance(provider_data.get("response"), dict):
+            usage = provider_data["response"].get("usage")
+    field_aliases: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("input_tokens", ("input_tokens", "prompt_tokens")),
+        ("output_tokens", ("output_tokens", "completion_tokens")),
+        ("total_tokens", ("total_tokens",)),
+        ("latency", ("latency",)),
+        ("time_to_first_token", ("time_to_first_token",)),
+    )
+    for normalized_key, candidates in field_aliases:
+        value = None
+        for key in candidates:
+            if isinstance(metrics, dict):
+                value = metrics.get(key)
+            else:
+                value = getattr(metrics, key, None)
+            if value is not None:
+                break
+            if isinstance(usage, dict):
+                value = usage.get(key)
+            elif usage is not None:
+                value = getattr(usage, key, None)
+            if value is not None:
+                break
         if value is not None:
-            snapshot[key] = value
+            snapshot[normalized_key] = value
+    if (
+        "total_tokens" not in snapshot
+        and "input_tokens" in snapshot
+        and "output_tokens" in snapshot
+    ):
+        try:
+            snapshot["total_tokens"] = int(snapshot["input_tokens"]) + int(snapshot["output_tokens"])
+        except (TypeError, ValueError):
+            pass
     return snapshot
+
+
+def _estimate_tokens_from_text(value: str) -> int:
+    text = value.strip()
+    if not text:
+        return 0
+    # Simple fallback heuristic when provider usage is unavailable.
+    return max(1, (len(text) + 3) // 4)
+
+
+def _estimate_input_tokens(response_input: Any) -> int:
+    if isinstance(response_input, str):
+        return _estimate_tokens_from_text(response_input)
+    if isinstance(response_input, list):
+        parts: list[str] = []
+        for item in response_input:
+            content = getattr(item, "content", None)
+            if isinstance(content, str):
+                parts.append(content)
+        return _estimate_tokens_from_text("\n".join(parts))
+    return _estimate_tokens_from_text(str(response_input))
+
+
+def _ensure_token_metrics(metrics: dict[str, Any], response_input: Any, output_text: str) -> dict[str, Any]:
+    merged = dict(metrics)
+    if (
+        merged.get("input_tokens") is None
+        or merged.get("output_tokens") is None
+        or merged.get("total_tokens") is None
+    ):
+        in_tokens = _estimate_input_tokens(response_input)
+        out_tokens = _estimate_tokens_from_text(output_text)
+        merged["input_tokens"] = in_tokens
+        merged["output_tokens"] = out_tokens
+        merged["total_tokens"] = in_tokens + out_tokens
+        merged["token_estimated"] = True
+    else:
+        merged["token_estimated"] = False
+    return merged
 
 
 def _collect_delegation_paths(node: Any, prefix: str = "") -> list[str]:
@@ -436,15 +548,23 @@ async def _run_agent(
     elapsed_ms = int((perf_counter() - started_at) * 1000)
     run_id = getattr(response, "run_id", None)
     model = getattr(response, "model", None)
-    metrics = _extract_metrics(getattr(response, "metrics", None))
+    output_text = extract_response_text(response)
+    metrics = _ensure_token_metrics(_extract_metrics(response), response_input, output_text)
     delegation_paths = _collect_delegation_paths(response) if _is_team_target(agent) else []
     logger.info(
-        "Target run completed kind=%s name=%s run_id=%s model=%s elapsed_ms=%d metrics=%s delegation_paths=%s",
+        (
+            "Target run completed kind=%s name=%s run_id=%s model=%s elapsed_ms=%d "
+            "input_tokens=%s output_tokens=%s total_tokens=%s token_estimated=%s metrics=%s delegation_paths=%s"
+        ),
         target_kind,
         target_name,
         run_id,
         model,
         elapsed_ms,
+        metrics.get("input_tokens"),
+        metrics.get("output_tokens"),
+        metrics.get("total_tokens"),
+        metrics.get("token_estimated"),
         metrics or {},
         " | ".join(delegation_paths) if delegation_paths else "n/a",
     )
@@ -454,6 +574,7 @@ async def _run_agent(
             status="completed",
             run_id=run_id,
             model=model,
+            metrics=metrics or {},
             extra={
                 "target_kind": target_kind,
                 "members": members,
@@ -462,7 +583,172 @@ async def _run_agent(
                 "delegation_paths": delegation_paths,
             },
         )
-    return extract_response_text(response)
+    return output_text
+
+
+def _iter_stream_in_thread(agent, response_input, user_id: str, session_id: str):
+    """Run agent.run(stream=True) in a thread and yield events via a queue."""
+    import queue as queue_mod
+
+    q: queue_mod.Queue = queue_mod.Queue()
+
+    def _produce():
+        try:
+            for event in agent.run(
+                response_input, stream=True, user_id=user_id, session_id=session_id
+            ):
+                q.put(event)
+        except Exception as exc:  # noqa: BLE001
+            q.put(exc)
+        finally:
+            q.put(None)
+
+    return q, _produce
+
+
+async def _run_agent_streaming(
+    agent,
+    content: str,
+    user_context: str | None,
+    user_id: str,
+    session_id: str,
+    channel: discord.abc.Messageable,
+    runtime_cfg: RuntimeConfig | None = None,
+) -> tuple[str, discord.Message | None]:
+    """Run agent with streaming, progressively editing a Discord message."""
+    cfg = runtime_cfg or RuntimeConfig()
+    response_input = _build_response_input(user_context, content)
+    target_name = _agent_name(agent)
+    monitor_token = None
+    if cfg.monitor is not None:
+        monitor_token = cfg.monitor.start(
+            run_kind="discord",
+            target_name=target_name,
+            user_id=user_id,
+            session_id=session_id,
+            timeout_seconds=cfg.agent_timeout,
+        )
+    started_at = perf_counter()
+    accumulated = ""
+    sent_message: discord.Message | None = None
+    last_edit_time: float = 0
+    edit_interval = cfg.streaming_edit_interval
+    final_response: Any = None
+
+    try:
+        async with _get_run_semaphore(cfg.max_concurrent_runs):
+            q, produce = _iter_stream_in_thread(
+                agent, response_input, user_id, session_id
+            )
+            loop = asyncio.get_event_loop()
+            thread = loop.run_in_executor(None, produce)
+
+            deadline = loop.time() + cfg.agent_timeout
+            while True:
+                if loop.time() > deadline:
+                    raise TimeoutError("agent timeout")
+                try:
+                    import queue as queue_mod
+
+                    event = await asyncio.wait_for(
+                        loop.run_in_executor(None, q.get, True, 2.0),
+                        timeout=3.0,
+                    )
+                except (TimeoutError, queue_mod.Empty):
+                    continue
+
+                if event is None:
+                    break
+                if isinstance(event, Exception):
+                    raise event
+
+                if isinstance(event, RunOutput):
+                    final_response = event
+                    text = extract_response_text(event)
+                    if text:
+                        accumulated = text
+                    break
+
+                event_type = getattr(event, "event", "")
+                if event_type == RunEvent.run_content.value:
+                    delta = getattr(event, "content", None)
+                    if isinstance(delta, str):
+                        accumulated += delta
+
+                    now = perf_counter()
+                    if accumulated and (now - last_edit_time) >= edit_interval:
+                        display = accumulated[:1900]
+                        if len(accumulated) > 1900:
+                            display += "…"
+                        try:
+                            if sent_message is None:
+                                sent_message = await channel.send(display)
+                            else:
+                                await sent_message.edit(content=display)
+                            last_edit_time = now
+                        except discord.HTTPException:
+                            pass
+
+            await thread
+    except TimeoutError as exc:
+        if cfg.monitor is not None:
+            cfg.monitor.finish(monitor_token, status="timeout", error=str(exc) or "agent timeout")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if cfg.monitor is not None:
+            cfg.monitor.finish(monitor_token, status="error", error=str(exc))
+        raise
+
+    elapsed_ms = int((perf_counter() - started_at) * 1000)
+    run_id = getattr(final_response, "run_id", None) if final_response else None
+    model = getattr(final_response, "model", None) if final_response else None
+    metrics = _extract_metrics(final_response) if final_response else {}
+    if not accumulated:
+        accumulated = extract_response_text(final_response) if final_response else ""
+    metrics = _ensure_token_metrics(metrics, response_input, accumulated)
+    logger.info(
+        (
+            "Target run completed kind=%s name=%s run_id=%s model=%s elapsed_ms=%d "
+            "input_tokens=%s output_tokens=%s total_tokens=%s token_estimated=%s metrics=%s delegation_paths=%s"
+        ),
+        "agent",
+        target_name,
+        run_id,
+        model,
+        elapsed_ms,
+        metrics.get("input_tokens"),
+        metrics.get("output_tokens"),
+        metrics.get("total_tokens"),
+        metrics.get("token_estimated"),
+        metrics or {},
+        "n/a",
+    )
+    if cfg.monitor is not None:
+        cfg.monitor.finish(
+            monitor_token,
+            status="completed",
+            run_id=run_id,
+            model=model,
+            metrics=metrics or {},
+            extra={
+                "target_kind": "agent",
+                "members": [],
+                "elapsed_ms": elapsed_ms,
+                "metrics": metrics or {},
+                "delegation_paths": [],
+                "streamed": True,
+            },
+        )
+
+    # Final edit with complete content
+    if sent_message is not None and accumulated:
+        final_text = accumulated[:1900]
+        try:
+            await sent_message.edit(content=final_text)
+        except discord.HTTPException:
+            pass
+
+    return accumulated, sent_message
 
 
 def _agent_name(agent: Any, fallback: str | None = None) -> str:
@@ -589,15 +875,30 @@ class DiscordAgentBot(commands.Bot):
         self.cron_cfg = load_cron_config(runtime.config)
         self._cron_scheduler = build_scheduler()
         self._cron_path = get_cron_path(runtime.config)
-        self._cron_last_mtime: float | None = None
+        try:
+            self._cron_last_mtime: float | None = self._cron_path.stat().st_mtime
+        except FileNotFoundError:
+            self._cron_last_mtime = None
         self._cron_watch_loop = tasks.loop(minutes=10)(self._cron_watch_tick)
 
     async def setup_hook(self) -> None:
         if self.heartbeat_cfg.enabled:
             self._heartbeat_loop.start()
+        logger.info(
+            "Cron config loaded enabled=%s path=%s jobs=%d",
+            self.cron_cfg.enabled,
+            self._cron_path,
+            len(self.cron_cfg.jobs),
+        )
         if self.cron_cfg.enabled:
             self._configure_cron_jobs()
-            self._cron_scheduler.start()
+            if not self._cron_scheduler.running:
+                self._cron_scheduler.start()
+            logger.info(
+                "Cron scheduler started path=%s jobs=%d",
+                self._cron_path,
+                len(self._cron_scheduler.get_jobs()),
+            )
         self._cron_watch_loop.start()
 
     async def close(self) -> None:
@@ -690,6 +991,7 @@ class DiscordAgentBot(commands.Bot):
                 async with message.channel.typing():
                     user_context = _build_user_context(self.runtime.config, message)
                     rt_cfg = self.runtime.runtime_cfg
+                    streamed_message: discord.Message | None = None
                     if research_mode_active:
                         reply = await _await_with_slow_notice(
                             _run_research_mode(
@@ -704,11 +1006,45 @@ class DiscordAgentBot(commands.Bot):
                             message.channel,
                             rt_cfg.slow_run_threshold_seconds,
                         )
+                    elif rt_cfg.streaming_enabled and not _is_team_target(agent):
+                        reply, streamed_message = await _run_agent_streaming(
+                            agent,
+                            content,
+                            user_context,
+                            user_id,
+                            session_id,
+                            message.channel,
+                            rt_cfg,
+                        )
+                        if "<tool_call>" in reply:
+                            reply = await _handle_toolcall_fallback(agent, reply, rt_cfg)
+                            streamed_message = None
                     else:
                         reply = await _await_with_slow_notice(
                             _run_agent(
                                 agent,
                                 content,
+                                user_context,
+                                user_id,
+                                session_id,
+                                rt_cfg,
+                            ),
+                            message.channel,
+                            rt_cfg.slow_run_threshold_seconds,
+                        )
+                        if "<tool_call>" in reply:
+                            reply = await _handle_toolcall_fallback(agent, reply, rt_cfg)
+                    if _needs_completion_retry(reply):
+                        logger.warning("Reply looks incomplete; retrying once for final answer")
+                        retry_prompt = (
+                            f"{content}\n\n"
+                            "Return the final answer directly. "
+                            "Do not describe your plan or say you will check/search."
+                        )
+                        reply = await _await_with_slow_notice(
+                            _run_agent(
+                                agent,
+                                retry_prompt,
                                 user_context,
                                 user_id,
                                 session_id,
@@ -733,7 +1069,12 @@ class DiscordAgentBot(commands.Bot):
             return
 
         self.last_active_channel_id = message.channel.id
-        await _send_chunked(message.channel, reply)
+        if streamed_message is not None:
+            # Already sent via streaming edits; send overflow chunks if needed
+            if len(reply) > 1900:
+                await _send_chunked(message.channel, reply[1900:])
+        else:
+            await _send_chunked(message.channel, reply)
 
     async def _heartbeat_tick(self) -> None:
         if not self.heartbeat_cfg.enabled:
@@ -792,27 +1133,47 @@ class DiscordAgentBot(commands.Bot):
 
     def _configure_cron_jobs(self) -> None:
         if not self.cron_cfg.jobs:
+            logger.info("Cron enabled but no jobs are configured")
             return
         for job in self.cron_cfg.jobs:
             timezone = job.timezone or self.cron_cfg.default_timezone
             trigger = build_cron_trigger(job.cron, timezone)
             if trigger is None:
                 continue
-            self._cron_scheduler.add_job(
+            scheduled = self._cron_scheduler.add_job(
                 self._run_cron_job,
                 trigger=trigger,
                 args=[job],
                 id=job.name,
                 replace_existing=True,
             )
+            logger.info(
+                (
+                    "Registered cron job name=%s cron=%s timezone=%s next_run=%s "
+                    "session_scope=%s deliver=%s channel_id=%s"
+                ),
+                job.name,
+                job.cron,
+                timezone,
+                getattr(scheduled, "next_run_time", None),
+                job.session_scope,
+                job.deliver,
+                job.channel_id or self.cron_cfg.default_channel_id,
+            )
 
-    def _reload_cron(self) -> None:
+    def _reload_cron(self, reason: str = "manual") -> None:
+        logger.info("Reloading cron config reason=%s path=%s", reason, self._cron_path)
         self.cron_cfg = load_cron_config(self.runtime.config)
         if not self.cron_cfg.enabled:
             self._cron_scheduler.remove_all_jobs()
+            logger.info("Cron disabled after reload; all scheduled jobs removed")
             return
         self._cron_scheduler.remove_all_jobs()
         self._configure_cron_jobs()
+        if not self._cron_scheduler.running:
+            self._cron_scheduler.start()
+            logger.info("Cron scheduler started after reload")
+        logger.info("Cron reload completed active_jobs=%d", len(self._cron_scheduler.get_jobs()))
 
     async def _cron_watch_tick(self) -> None:
         try:
@@ -820,17 +1181,23 @@ class DiscordAgentBot(commands.Bot):
         except FileNotFoundError:
             if self._cron_last_mtime is not None:
                 self._cron_last_mtime = None
-                self._reload_cron()
+                logger.info("Cron config file removed: %s", self._cron_path)
+                self._reload_cron(reason="file_removed")
             return
         if self._cron_last_mtime is None:
             self._cron_last_mtime = stat.st_mtime
+            logger.info("Cron config file detected: %s", self._cron_path)
+            self._reload_cron(reason="file_created")
             return
         if stat.st_mtime > self._cron_last_mtime:
             self._cron_last_mtime = stat.st_mtime
-            self._reload_cron()
+            logger.info("Cron config file changed: %s", self._cron_path)
+            self._reload_cron(reason="file_changed")
 
     async def _run_cron_job(self, job) -> None:
         channel_id = job.channel_id or self.cron_cfg.default_channel_id
+        if channel_id is None:
+            channel_id = self.last_active_channel_id
         send_fn = None
         if channel_id is not None:
             channel = self.get_channel(int(channel_id))
@@ -943,6 +1310,29 @@ def _strip_tool_call_markup(text: str) -> str:
     return cleaned
 
 
+def _needs_completion_retry(reply: str) -> bool:
+    text = reply.strip()
+    if not text:
+        return True
+    if len(text) > 260:
+        return False
+    lowered = text.lower()
+    if "<tool_call>" in lowered:
+        return False
+    if lowered.endswith(":"):
+        return True
+    placeholder_prefixes = (
+        "let me ",
+        "i will ",
+        "i'll ",
+        "i am going to ",
+        "i'm going to ",
+        "one moment",
+        "hold on",
+    )
+    return any(lowered.startswith(prefix) for prefix in placeholder_prefixes)
+
+
 def _get_declared_functions(tool: Any) -> set[str]:
     get_functions = getattr(tool, "get_functions", None)
     if callable(get_functions):
@@ -1028,39 +1418,14 @@ async def _handle_toolcall_fallback(
             f"Executed tool call(s): {names}\n\n"
             "The command completed but returned no output."
         )
-    prompt = "Summarize these tool results for Discord. Use bullets and include links when present.\n\n"
+    lines = ["Tool results:"]
     for item in results:
-        prompt += f"{item['name']}:\n{item['output']}\n\n"
-    monitor_token = None
-    if cfg.monitor is not None:
-        monitor_token = cfg.monitor.start(
-            run_kind="discord_tool_fallback",
-            target_name=_agent_name(agent),
-            user_id="tool_fallback",
-            session_id="tool_fallback",
-            timeout_seconds=cfg.agent_timeout,
-        )
-    try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(agent.run, prompt, user_id="tool_fallback", session_id="tool_fallback"),
-            timeout=cfg.agent_timeout,
-        )
-    except TimeoutError as exc:
-        if cfg.monitor is not None:
-            cfg.monitor.finish(monitor_token, status="timeout", error=str(exc) or "tool fallback timeout")
-        raise
-    except Exception as exc:  # noqa: BLE001
-        if cfg.monitor is not None:
-            cfg.monitor.finish(monitor_token, status="error", error=str(exc))
-        raise
-    if cfg.monitor is not None:
-        cfg.monitor.finish(
-            monitor_token,
-            status="completed",
-            run_id=getattr(response, "run_id", None),
-            model=getattr(response, "model", None),
-        )
-    return extract_response_text(response)
+        name = item.get("name", "tool_call").strip() or "tool_call"
+        output = item.get("output", "").strip() or "(no output)"
+        if len(output) > 1500:
+            output = output[:1500].rstrip() + "\n...[truncated]"
+        lines.append(f"- {name}:\n{output}")
+    return "\n\n".join(lines)
 
 
 async def _run_research_mode(

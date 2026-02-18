@@ -84,6 +84,64 @@ def resolve_heartbeat_identity(session_scope: str, now: datetime | None = None) 
     return identity, identity
 
 
+def _extract_metrics(metrics: Any) -> dict[str, Any]:
+    if metrics is None:
+        return {}
+    snapshot: dict[str, Any] = {}
+    usage = getattr(metrics, "usage", None)
+    if isinstance(metrics, dict):
+        usage = metrics.get("usage", usage)
+    for normalized_key, keys in (
+        ("input_tokens", ("input_tokens", "prompt_tokens")),
+        ("output_tokens", ("output_tokens", "completion_tokens")),
+        ("total_tokens", ("total_tokens",)),
+    ):
+        value = None
+        for key in keys:
+            value = metrics.get(key) if isinstance(metrics, dict) else getattr(metrics, key, None)
+            if value is not None:
+                break
+            if isinstance(usage, dict):
+                value = usage.get(key)
+            elif usage is not None:
+                value = getattr(usage, key, None)
+            if value is not None:
+                break
+        if value is not None:
+            snapshot[normalized_key] = value
+    if "total_tokens" not in snapshot and "input_tokens" in snapshot and "output_tokens" in snapshot:
+        try:
+            snapshot["total_tokens"] = int(snapshot["input_tokens"]) + int(snapshot["output_tokens"])
+        except (TypeError, ValueError):
+            pass
+    return snapshot
+
+
+def _estimate_tokens_from_text(value: str) -> int:
+    text = value.strip()
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
+def _ensure_token_metrics(metrics: dict[str, Any], prompt: str, output_text: str) -> dict[str, Any]:
+    merged = dict(metrics)
+    if (
+        merged.get("input_tokens") is None
+        or merged.get("output_tokens") is None
+        or merged.get("total_tokens") is None
+    ):
+        in_tokens = _estimate_tokens_from_text(prompt)
+        out_tokens = _estimate_tokens_from_text(output_text)
+        merged["input_tokens"] = in_tokens
+        merged["output_tokens"] = out_tokens
+        merged["total_tokens"] = in_tokens + out_tokens
+        merged["token_estimated"] = True
+    else:
+        merged["token_estimated"] = False
+    return merged
+
+
 async def run_heartbeat(
     agent: Agent,
     prompt: str,
@@ -126,12 +184,23 @@ async def run_heartbeat(
                 monitor.finish(monitor_token, status="error", error=str(exc))
             raise
     content = extract_response_text(response).strip()
+    metrics = _ensure_token_metrics(_extract_metrics(response), prompt, content)
+    logger.info(
+        "Heartbeat completed run_id=%s model=%s input_tokens=%s output_tokens=%s total_tokens=%s token_estimated=%s",
+        getattr(response, "run_id", None),
+        getattr(response, "model", None),
+        metrics.get("input_tokens"),
+        metrics.get("output_tokens"),
+        metrics.get("total_tokens"),
+        metrics.get("token_estimated"),
+    )
     if monitor is not None:
         monitor.finish(
             monitor_token,
             status="completed",
             run_id=getattr(response, "run_id", None),
             model=getattr(response, "model", None),
+            metrics=metrics or {},
         )
     if not content:
         return

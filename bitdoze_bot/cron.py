@@ -20,6 +20,74 @@ from bitdoze_bot.utils import extract_response_text
 logger = logging.getLogger(__name__)
 
 
+def normalize_cron_session_scope(value: object) -> str:
+    normalized = str(value or "isolated").strip().lower()
+    if normalized in {"main", "shared"}:
+        return "main"
+    if normalized in {"isolated", "private"}:
+        return "isolated"
+    logger.warning("Invalid cron session_scope '%s'; defaulting to 'isolated'", value)
+    return "isolated"
+
+
+def _extract_metrics(metrics):
+    if metrics is None:
+        return {}
+    snapshot: dict[str, int] = {}
+    usage = getattr(metrics, "usage", None)
+    if isinstance(metrics, dict):
+        usage = metrics.get("usage", usage)
+    for normalized_key, keys in (
+        ("input_tokens", ("input_tokens", "prompt_tokens")),
+        ("output_tokens", ("output_tokens", "completion_tokens")),
+        ("total_tokens", ("total_tokens",)),
+    ):
+        value = None
+        for key in keys:
+            value = metrics.get(key) if isinstance(metrics, dict) else getattr(metrics, key, None)
+            if value is not None:
+                break
+            if isinstance(usage, dict):
+                value = usage.get(key)
+            elif usage is not None:
+                value = getattr(usage, key, None)
+            if value is not None:
+                break
+        if value is not None:
+            snapshot[normalized_key] = value
+    if "total_tokens" not in snapshot and "input_tokens" in snapshot and "output_tokens" in snapshot:
+        try:
+            snapshot["total_tokens"] = int(snapshot["input_tokens"]) + int(snapshot["output_tokens"])
+        except (TypeError, ValueError):
+            pass
+    return snapshot
+
+
+def _estimate_tokens_from_text(value: str) -> int:
+    text = value.strip()
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
+def _ensure_token_metrics(metrics: dict, prompt: str, output_text: str) -> dict:
+    merged = dict(metrics)
+    if (
+        merged.get("input_tokens") is None
+        or merged.get("output_tokens") is None
+        or merged.get("total_tokens") is None
+    ):
+        in_tokens = _estimate_tokens_from_text(prompt)
+        out_tokens = _estimate_tokens_from_text(output_text)
+        merged["input_tokens"] = in_tokens
+        merged["output_tokens"] = out_tokens
+        merged["total_tokens"] = in_tokens + out_tokens
+        merged["token_estimated"] = True
+    else:
+        merged["token_estimated"] = False
+    return merged
+
+
 @dataclass(frozen=True)
 class CronJobConfig:
     name: str
@@ -78,7 +146,7 @@ def load_cron_config(config: Config) -> CronConfig:
         channel_id = raw.get("channel_id")
         if channel_id is not None:
             channel_id = int(channel_id)
-        session_scope = str(raw.get("session_scope", "isolated"))
+        session_scope = normalize_cron_session_scope(raw.get("session_scope", "isolated"))
         jobs.append(
             CronJobConfig(
                 name=name,
@@ -118,6 +186,14 @@ async def run_cron_job(
     session_id = "cron:isolated"
     if job.session_scope == "main":
         session_id = "cron:main"
+    logger.info(
+        "Cron job starting name=%s session_scope=%s session_id=%s deliver=%s channel_id=%s",
+        job.name,
+        job.session_scope,
+        session_id,
+        job.deliver,
+        job.channel_id,
+    )
     agent_name = str(getattr(agent, "name", "unknown"))
     monitor_token = None
     if monitor is not None:
@@ -155,12 +231,24 @@ async def run_cron_job(
             logger.exception("Cron job '%s' failed", job.name)
             return
     content = extract_response_text(response).strip()
+    metrics = _ensure_token_metrics(_extract_metrics(response), job.message, content)
+    logger.info(
+        "Cron job completed name=%s run_id=%s model=%s input_tokens=%s output_tokens=%s total_tokens=%s token_estimated=%s",
+        job.name,
+        getattr(response, "run_id", None),
+        getattr(response, "model", None),
+        metrics.get("input_tokens"),
+        metrics.get("output_tokens"),
+        metrics.get("total_tokens"),
+        metrics.get("token_estimated"),
+    )
     if monitor is not None:
         monitor.finish(
             monitor_token,
             status="completed",
             run_id=getattr(response, "run_id", None),
             model=getattr(response, "model", None),
+            metrics=metrics or {},
         )
     if job.deliver and send_fn is not None and content:
         await send_fn(content)

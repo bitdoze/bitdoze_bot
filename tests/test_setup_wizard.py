@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from bitdoze_bot import setup_wizard
 from bitdoze_bot.setup_wizard import SetupAnswers, run_setup
 
 
@@ -228,3 +229,72 @@ def test_run_setup_migrates_legacy_config_yml_to_yaml(tmp_path: Path) -> None:
     assert backups
     cfg = _load_yaml(home_dir / "config.yaml")
     assert cfg["model"]["id"] == "legacy-model"
+
+
+def test_setup_pgvector_uses_sudo_when_docker_socket_is_not_writable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home_dir = tmp_path / "home"
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(setup_wizard, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/docker" if cmd == "docker" else "/usr/bin/sudo")
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    monkeypatch.setattr("os.access", lambda _path, _mode: False)
+    monkeypatch.setattr(Path, "exists", lambda self: True if str(self) == "/var/run/docker.sock" else Path.is_file(self))
+
+    called: list[list[str]] = []
+
+    def _fake_run(cmd, check, timeout):
+        called.append(cmd)
+        return None
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    setup_wizard._setup_pgvector_docker(home_dir)
+
+    assert called == [
+        [
+            "/usr/bin/sudo",
+            "/usr/bin/docker",
+            "compose",
+            "-f",
+            str(compose_file),
+            "up",
+            "-d",
+        ]
+    ]
+
+
+def test_setup_pgvector_runs_without_sudo_when_socket_is_writable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home_dir = tmp_path / "home"
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(setup_wizard, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/docker" if cmd == "docker" else None)
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    monkeypatch.setattr("os.access", lambda _path, _mode: True)
+    monkeypatch.setattr(Path, "exists", lambda self: True if str(self) == "/var/run/docker.sock" else Path.is_file(self))
+
+    called: list[list[str]] = []
+
+    def _fake_run(cmd, check, timeout):
+        called.append(cmd)
+        return None
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    setup_wizard._setup_pgvector_docker(home_dir)
+
+    assert called == [
+        [
+            "/usr/bin/docker",
+            "compose",
+            "-f",
+            str(compose_file),
+            "up",
+            "-d",
+        ]
+    ]

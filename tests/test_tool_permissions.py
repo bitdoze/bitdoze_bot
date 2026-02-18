@@ -263,6 +263,30 @@ def test_file_tool_argument_aliases_and_workspace_prefix_are_normalized(tmp_path
     assert tool.last_file_name == "USER.md"
 
 
+def test_file_tool_absolute_root_path_is_remapped_to_workspace_relative(tmp_path: Path) -> None:
+    config = Config(
+        data={
+            "tool_permissions": {
+                "enabled": False,
+                "audit": {"enabled": False},
+            }
+        },
+        path=Path("config.yaml"),
+    )
+    manager = ToolPermissionManager.from_config(config)
+    tool = manager.wrap_tool(
+        DummyFileCompatTool(base_dir=tmp_path / "workspace"),
+        tool_name="file",
+        agent_name_getter=lambda: "main",
+    )
+
+    with tool_runtime_context(run_kind="discord", agent_name="main"):
+        result = tool.save_file(contents="hello", file_name="/USER.md")
+
+    assert result == "ok"
+    assert tool.last_file_name == "USER.md"
+
+
 def test_github_update_argument_aliases_and_defaults_are_normalized(tmp_path: Path) -> None:
     config = Config(
         data={

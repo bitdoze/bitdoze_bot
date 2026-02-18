@@ -1,58 +1,98 @@
 # Bitdoze Bot (Agno + Discord)
 
-A Discord-first agent powered by Agno, with Web Search, Website Scraping, Local File tools, memory, and a periodic heartbeat.
+A Discord-first AI agent powered by [Agno](https://github.com/agno-agi/agno), with streaming responses, vector knowledge base, self-improvement, team orchestration, and a rich toolkit ecosystem.
 
 ## Features
-- **Agno toolkits**: WebSearchTools, WebsiteTools, FileTools, DiscordTools
-- **Agno toolkits**: WebSearchTools, HackerNewsTools, WebsiteTools, GithubTools, YouTubeTools, FileTools, ShellTools, DiscordTools
-- **Agno Teams**: native team orchestration with delegation options
-- **Team observability**: logs selected members, delegation paths, run timing, and metrics
-- **Structured logging**: config-driven stdout + optional rotating file logs
-- **Memory**: SQLite-backed, automatic memory updates by default
-- **Learning**: Agno LearningMachine per member agent (user profile + memory stores)
-- **Soul + Heartbeat**: persona via `workspace/SOUL.md`, heartbeat checks via `workspace/HEARTBEAT.md`
-- **Mention-first**: respond when tagged with `@Bot`
-- **Extensible**: add more agents and future skills in config
 
-## Setup
-1) Install dependencies:
+### Core
+- **Streaming responses** — real-time message updates in Discord as the agent thinks
+- **Agno toolkits** — WebSearch, HackerNews, Website, GitHub, YouTube, File, Shell, Reddit, Discord
+- **Agno Teams** — native team orchestration with member delegation
+- **Team observability** — logs selected members, delegation paths, run timing, and metrics
+- **Mention-first** — responds when tagged with `@Bot`
+
+### Memory & Knowledge
+- **Memory** — SQLite-backed with automatic updates, session summaries, and chat history
+- **Learning** — Agno LearningMachine per agent (user profile, memory, session context, entity, learned knowledge)
+- **Knowledge base** — vector search with LanceDb (file-based) or PgVector (PostgreSQL) backends
+- **Self-improvement** — discovery tools let the agent save and search its own learnings over time
+- **Soul + Heartbeat** — persona via `workspace/SOUL.md`, proactive heartbeat via `workspace/HEARTBEAT.md`
+
+### Infrastructure
+- **Docker support** — optional PostgreSQL + PgVector via `docker-compose.yml`
+- **Structured logging** — config-driven stdout + optional rotating file logs
+- **Tool permissions** — runtime allow/deny rules with JSONL audit logging
+- **Extensible** — add agents via config or folder-based workspace agents
+
+## Quick Start
+
+### 1. Install dependencies
 
 ```bash
-pip install agno discord.py pyyaml ddgs beautifulsoup4
+# Using uv (recommended)
+uv sync
+
+# Or with pip
+pip install -e .
 ```
 
-2) Run the setup wizard:
+### 2. Run the setup wizard
 
 ```bash
 python scripts/setup_bot.py
 ```
 
-The wizard creates and updates `~/.bitdoze-bot/` (or `$BITDOZE_BOT_HOME`) with:
-- `config.yaml` (or existing `config.yml`)
-- `.env`
-- `workspace/` starter files (optional)
-- `workspace/agents/` starter agents (optional)
-- `bitdoze-bot.service` with your resolved paths
-- `skills/`
-- `logs/`
-- `data/`
+The wizard creates `~/.bitdoze-bot/` (or `$BITDOZE_BOT_HOME`) with:
+- `config.yaml` — main configuration
+- `.env` — secrets (tokens, API keys)
+- `workspace/` — SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, CRON.yaml
+- `workspace/agents/` — folder-based agent definitions
+- `workspace/knowledge/` — documents for the knowledge base
+- `skills/`, `logs/`, `data/`
+- `bitdoze-bot.service` — systemd unit file
 
 Wizard prompts:
-- Required in normal flow: Discord token value
-- Optional: GitHub token value
-- Optional: model/API settings (advanced prompt)
-- Optional: install service into `~/.config/systemd/user/bitdoze-bot.service`
+- **Required**: Discord bot token
+- **Optional**: GitHub token, model/API settings, systemd service install
+- **Optional**: PostgreSQL + PgVector setup via Docker (for knowledge base)
+- **Optional**: Knowledge backend selection (LanceDb or PgVector)
 
-3) Review generated files:
+### 3. (Optional) Start PgVector
+
+If you chose PgVector during setup, or want to start it manually:
+
+```bash
+docker compose up -d
+```
+
+This starts PostgreSQL 17 with pgvector on port 5532, storing data at `~/.bitdoze-bot/data/pgdata`.
+
+### 4. (Optional) Setup knowledge base
+
+```bash
+# Initialize and load documents from workspace/knowledge/
+python scripts/setup_knowledge.py
+
+# Or with custom options
+python scripts/setup_knowledge.py --backend pgvector --docs-dir /path/to/docs
+```
+
+Add `.md`, `.txt`, or `.pdf` files to `~/.bitdoze-bot/workspace/knowledge/` and re-run the script to ingest them.
+
+### 5. (Optional) Generate SOUL.md
+
+```bash
+python scripts/generate_soul.py
+# or force overwrite: python scripts/generate_soul.py --force
+```
+
+Generates a comprehensive personality and self-improvement template at `~/.bitdoze-bot/workspace/SOUL.md`.
+
+### 6. Review and run
 
 ```bash
 $EDITOR ~/.bitdoze-bot/.env
 $EDITOR ~/.bitdoze-bot/config.yaml
-```
-
-4) Run the bot:
-
-```bash
 python main.py
 ```
 
@@ -65,19 +105,71 @@ Edit `~/.bitdoze-bot/config.yaml` (or `config.yml` if that is your active file):
 - Relative paths are resolved from the config file location.
 - Override home location with `BITDOZE_BOT_HOME=/custom/path`.
 - Explicit overrides still work: `python main.py --config /path/config.yaml --env-file /path/.env`.
+
+### Model
 - `model`: provider, model id, base URL, and API key env var
 - `model.structured_outputs`: set `false` for providers that reject response_format (e.g., StepFun/OpenRouter)
+
+### Discord & Streaming
 - `discord`: bot token env var
+- `runtime.streaming_enabled`: stream responses to Discord with real-time message edits (default: `true`)
+- `runtime.streaming_edit_interval`: seconds between message edits during streaming (default: `1.5`)
+
+Streaming progressively edits the Discord message as the agent generates content. It falls back to non-streaming for team runs and research mode.
+
+### Runtime
 - `runtime`: timeouts for agent runs, cron, heartbeat, and max concurrency
 - `runtime.slow_run_threshold_seconds`: sends an interim "still working" reply when complex runs take longer than expected
+
+### Knowledge Base
+- `knowledge.enabled`: activate vector search knowledge base
+- `knowledge.backend`: `lancedb` (file-based, zero setup) or `pgvector` (requires PostgreSQL)
+- `knowledge.embedder`: embedding model (default: `text-embedding-3-small`)
+- LanceDb settings: `lance_uri`, `table_name`, `learnings_table_name`
+- PgVector settings: `db_url` (or `PGVECTOR_DB_URL` env var)
+
+```yaml
+knowledge:
+  enabled: true
+  backend: lancedb         # or pgvector
+  embedder: text-embedding-3-small
+  lance_uri: data/lancedb
+  table_name: bitdoze_knowledge
+  learnings_table_name: bitdoze_learnings
+  # db_url: postgresql+psycopg://bitdoze:secret@localhost:5532/bitdoze  # for pgvector
+```
+
+### Self-Improvement (Discovery Tools)
+The agent can build and query its own knowledge base using the `discoveries` toolkit:
+- `save_discovery`: save a reusable learning (corrections, preferences, patterns)
+- `search_discoveries`: search past learnings before answering
+
+Add `discoveries` to an agent's tools list to enable:
+
+```yaml
+agents:
+  definitions:
+    - name: main
+      tools: [web_search, website, file, discoveries]
+```
+
+Combined with `learned_knowledge: agentic` in learning config, the agent decides when to save and recall learnings automatically.
+
+### Memory
+- `memory`: `mode: automatic` (best capture), SQLite db path, history + summaries (custom prompt supported)
+- `memory.summary_prompt`: customizable session summary with support for `decisions` and `unresolved` keys
+
+### Learning
+- `learning`: enable Agno LearningMachine and set learning modes (`always`, `agentic`, `propose`, `hitl`)
+- `learning.stores.learned_knowledge: agentic` — agent decides when to save/search learnings (recommended)
+
+### Other
 - `monitoring`: JSONL telemetry for runs + heartbeat watchdog alerts for long-running active tasks
 - `tool_fallback.denied_tools`: tool names blocked during XML-style fallback execution (default: `shell`, `discord`)
 - `logging`: set level, format, and rotating file settings from YAML
 - `research_mode`: enforce structured research responses and minimum source URLs
 - `tool_permissions`: runtime allow/deny rules for tool use plus JSONL audit logging
-- `memory`: `mode: automatic` (best capture), SQLite db path, history + summaries (custom prompt supported)
-- `learning`: enable Agno LearningMachine and set learning modes (`always`, `agentic`, `propose`, `hitl`)
-- `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, discord tools
+- `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, reddit, discord tools
 - `agents.workspace_dir`: folder-based agent loading from `workspace/agents/<name>/`
 - `teams`: native Agno Team definitions, delegation behavior, team memory options, and default team
 - `heartbeat`: 30-min cadence, optional channel override, `session_scope` (`isolated` to avoid heartbeat history growth), and optional dedicated `agent`
@@ -330,6 +422,55 @@ agents:
 
 Skill names must be lowercase and use hyphens, and must match the folder name.
 
+## Docker (PgVector)
+
+The project includes a `docker-compose.yml` for PostgreSQL 17 with pgvector. This is **optional** — LanceDb works without any external services.
+
+```bash
+# Start PgVector
+docker compose up -d
+
+# Check status
+docker compose ps
+
+# View logs
+docker compose logs -f pgvector
+
+# Stop
+docker compose down
+```
+
+Configuration:
+| Setting | Default | Env Var |
+|---------|---------|---------|
+| Port | 5532 | `PGVECTOR_PORT` |
+| Database | bitdoze | — |
+| User | bitdoze | — |
+| Password | bitdoze_secret | `POSTGRES_PASSWORD` |
+| Data dir | `~/.bitdoze-bot/data/pgdata` | `BITDOZE_BOT_HOME` |
+| Connection URL | `postgresql+psycopg://bitdoze:bitdoze_secret@localhost:5532/bitdoze` | `PGVECTOR_DB_URL` |
+
+Port 5532 is used to avoid conflicts with any system PostgreSQL on 5432.
+
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/setup_bot.py` | Interactive setup wizard (config, env, service, Docker) |
+| `scripts/generate_soul.py` | Generate/update SOUL.md with self-improvement template |
+| `scripts/setup_knowledge.py` | Initialize knowledge base and load documents |
+
+```bash
+# Setup wizard
+python scripts/setup_bot.py
+
+# Generate SOUL.md (supports --force, --dry-run, --home-dir)
+python scripts/generate_soul.py
+
+# Setup knowledge base (supports --backend, --docs-dir, --config)
+python scripts/setup_knowledge.py
+```
+
 ## Notes
 - **Heartbeat** sends a proactive update every 30 minutes. If it returns `HEARTBEAT_OK`, the message is suppressed.
 - For lower token usage, keep `heartbeat.session_scope: isolated` and optionally point `heartbeat.agent` to a lightweight agent with minimal tools/memory.
@@ -364,3 +505,32 @@ Current coverage includes:
 - alias resolution
 - routing rule selection
 - delegation path extraction helper
+- config loading and validation
+- setup wizard answer generation
+
+## Project Structure
+
+```
+bitdoze-bot/
+├── main.py                    # Entry point
+├── config.example.yaml        # Reference configuration
+├── docker-compose.yml         # PgVector (optional)
+├── pyproject.toml             # Dependencies (managed with uv)
+├── bitdoze_bot/
+│   ├── agents.py              # Agent/team construction + knowledge base
+│   ├── config.py              # Config loading and resolution
+│   ├── cron.py                # Scheduled job runner
+│   ├── discord_bot.py         # Discord client + streaming handler
+│   ├── discovery_tools.py     # Self-improvement tools (save/search discoveries)
+│   ├── heartbeat.py           # Periodic health checks
+│   ├── logging_setup.py       # Structured logging
+│   ├── run_monitor.py         # Run monitoring + telemetry
+│   ├── setup_wizard.py        # Interactive setup
+│   ├── tool_permissions.py    # Tool access control + audit
+│   └── utils.py               # Shared utilities
+├── scripts/
+│   ├── setup_bot.py           # Setup wizard entry point
+│   ├── generate_soul.py       # SOUL.md generator
+│   └── setup_knowledge.py     # Knowledge base setup
+└── tests/                     # pytest test suite
+```

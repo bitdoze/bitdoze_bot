@@ -1,0 +1,18 @@
+services:
+  pgvector:
+    image: pgvector/pgvector:pg17
+    container_name: bitdoze-pgvector
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bitdoze
+      POSTGRES_USER: bitdoze
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bitdoze_secret}
+    ports:
+      - "${PGVECTOR_PORT:-5532}:5432"
+    volumes:
+      - ${BITDOZE_BOT_HOME:-/home/dragos/.bitdoze-bot}/data/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bitdoze -d bitdoze"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
