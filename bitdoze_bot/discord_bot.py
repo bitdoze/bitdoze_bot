@@ -68,6 +68,7 @@ class RuntimeConfig:
     watchdog_threshold_seconds: int = 120
     watchdog_max_reports: int = 5
     fallback_denied_tools: tuple[str, ...] = ("shell", "discord")
+    session_id_strategy: str = "channel_user"
     monitor: RunMonitor | None = None
 
 
@@ -94,6 +95,9 @@ def load_runtime_config(config: Config) -> RuntimeConfig:
     monitoring_cfg = monitoring_raw if isinstance(monitoring_raw, dict) else {}
     fallback_raw = config.get("tool_fallback", default={})
     fallback_cfg = fallback_raw if isinstance(fallback_raw, dict) else {}
+    session_id_strategy_raw = str(cfg.get("session_id_strategy", "channel_user")).strip().lower()
+    if session_id_strategy_raw not in {"channel", "user", "channel_user"}:
+        session_id_strategy_raw = "channel_user"
     denied_tools_cfg = fallback_cfg.get("denied_tools", ["shell", "discord"])
     denied_tools: tuple[str, ...] = ("shell", "discord")
     if isinstance(denied_tools_cfg, list):
@@ -126,7 +130,21 @@ def load_runtime_config(config: Config) -> RuntimeConfig:
             1,
         ),
         fallback_denied_tools=denied_tools,
+        session_id_strategy=session_id_strategy_raw,
         monitor=monitor,
+    )
+
+
+def _load_access_control_settings(config: Config) -> _AccessControlSettings:
+    discord_cfg = config.get("discord", default={})
+    discord_map = discord_cfg if isinstance(discord_cfg, dict) else {}
+    access_cfg = discord_map.get("access_control", {})
+    access_map = access_cfg if isinstance(access_cfg, dict) else {}
+    return _AccessControlSettings(
+        allowed_user_ids=_coerce_int_set(access_map.get("allowed_user_ids")),
+        allowed_channel_ids=_coerce_int_set(access_map.get("allowed_channel_ids")),
+        allowed_guild_ids=_coerce_int_set(access_map.get("allowed_guild_ids")),
+        allowed_role_ids=_coerce_int_set(access_map.get("allowed_role_ids")),
     )
 
 
@@ -153,8 +171,19 @@ class _ContextSettings:
     user_path: Path
     memory_dir: Path
     long_memory_path: Path
+    scope_workspace_context_by_tenant: bool
+    scoped_context_dir: Path
+    allow_global_context_in_guilds: bool
     main_session_scope: str
     tzinfo: ZoneInfo
+
+
+@dataclass(frozen=True)
+class _AccessControlSettings:
+    allowed_user_ids: frozenset[int]
+    allowed_channel_ids: frozenset[int]
+    allowed_guild_ids: frozenset[int]
+    allowed_role_ids: frozenset[int]
 
 
 def _coerce_int_set(values: Any) -> frozenset[int]:
@@ -208,8 +237,52 @@ def _load_context_settings(config: Config) -> _ContextSettings:
         user_path=config.resolve_path(cfg.get("user_path"), default="workspace/USER.md"),
         memory_dir=config.resolve_path(cfg.get("memory_dir"), default="workspace/memory"),
         long_memory_path=config.resolve_path(cfg.get("long_memory_path"), default="workspace/MEMORY.md"),
+        scope_workspace_context_by_tenant=parse_bool(cfg.get("scope_workspace_context_by_tenant", True), True),
+        scoped_context_dir=config.resolve_path(cfg.get("scoped_context_dir"), default="workspace/context"),
+        allow_global_context_in_guilds=parse_bool(cfg.get("allow_global_context_in_guilds", False), False),
         main_session_scope=str(cfg.get("main_session_scope", "dm_only")),
         tzinfo=tzinfo,
+    )
+
+
+def _is_message_authorized(settings: _AccessControlSettings, message: discord.Message) -> bool:
+    if settings.allowed_user_ids and message.author.id not in settings.allowed_user_ids:
+        return False
+    if settings.allowed_channel_ids and message.channel.id not in settings.allowed_channel_ids:
+        return False
+    if message.guild is not None:
+        if settings.allowed_guild_ids and message.guild.id not in settings.allowed_guild_ids:
+            return False
+        if settings.allowed_role_ids:
+            role_ids = set(_extract_role_ids(message))
+            if role_ids.isdisjoint(settings.allowed_role_ids):
+                return False
+    return True
+
+
+def _build_session_id(message: discord.Message, strategy: str) -> str:
+    guild_segment = str(message.guild.id) if message.guild else "dm"
+    if strategy == "channel":
+        return f"discord:{guild_segment}:channel:{message.channel.id}"
+    if strategy == "user":
+        return f"discord:{guild_segment}:user:{message.author.id}"
+    return f"discord:{guild_segment}:channel:{message.channel.id}:user:{message.author.id}"
+
+
+def _resolve_context_paths_for_message(
+    settings: _ContextSettings,
+    message: discord.Message,
+) -> tuple[Path, Path, Path]:
+    if not settings.scope_workspace_context_by_tenant:
+        return settings.user_path, settings.memory_dir, settings.long_memory_path
+    if message.guild is None:
+        context_root = settings.scoped_context_dir / f"dm-user-{message.author.id}"
+    else:
+        context_root = settings.scoped_context_dir / f"guild-{message.guild.id}" / f"user-{message.author.id}"
+    return (
+        context_root / "USER.md",
+        context_root / "memory",
+        context_root / "MEMORY.md",
     )
 
 
@@ -638,18 +711,25 @@ def _select_agent_name_compiled(
 def _build_user_context_from_settings(settings: _ContextSettings, message: discord.Message) -> str:
     if not settings.use_workspace_context_files:
         return ""
+    if (
+        message.guild is not None
+        and not settings.scope_workspace_context_by_tenant
+        and not settings.allow_global_context_in_guilds
+    ):
+        return ""
 
     today = datetime.now(settings.tzinfo).date()
     yesterday = today - timedelta(days=1)
+    user_path, memory_dir, long_memory_path = _resolve_context_paths_for_message(settings, message)
 
     sections: list[str] = []
-    user_text = read_text_if_exists(settings.user_path)
+    user_text = read_text_if_exists(user_path)
     if user_text:
         sections.append("USER:\n" + user_text)
 
-    if settings.memory_dir.exists():
+    if memory_dir.exists():
         for day in (yesterday, today):
-            daily_path = settings.memory_dir / f"{day.isoformat()}.md"
+            daily_path = memory_dir / f"{day.isoformat()}.md"
             daily_text = read_text_if_exists(daily_path)
             if daily_text:
                 sections.append(f"DAILY {day.isoformat()}:\n{daily_text}")
@@ -659,7 +739,7 @@ def _build_user_context_from_settings(settings: _ContextSettings, message: disco
         or (settings.main_session_scope == "dm_only" and message.guild is None)
     )
     if include_long_memory:
-        long_memory_text = read_text_if_exists(settings.long_memory_path)
+        long_memory_text = read_text_if_exists(long_memory_path)
         if long_memory_text:
             sections.append("MEMORY:\n" + long_memory_text)
 
@@ -689,6 +769,7 @@ class DiscordAgentBot(commands.Bot):
         self.last_active_channel_id: int | None = None
         self._routing_rules = _compile_routing_rules(runtime.config)
         self._context_settings = _load_context_settings(runtime.config)
+        self._access_control = _load_access_control_settings(runtime.config)
         self._toolkit_log_cache: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {}
         self._cognee_cfg: CogneeConfig = load_cognee_config(runtime.config)
         self._cognee_client: CogneeClient | None = (
@@ -891,6 +972,15 @@ class DiscordAgentBot(commands.Bot):
 
         if not should_respond:
             return
+        if not _is_message_authorized(self._access_control, message):
+            logger.warning(
+                "Blocked unauthorized message guild=%s channel=%s user=%s",
+                message.guild.id if message.guild else "dm",
+                message.channel.id,
+                message.author.id,
+            )
+            await message.channel.send("You are not allowed to use this bot in this context.")
+            return
 
         content = message.content or ""
         if self.user:
@@ -916,7 +1006,7 @@ class DiscordAgentBot(commands.Bot):
         )
         self._log_agent_toolkit_once(agent_name, agent)
 
-        session_id = f"discord:{message.guild.id if message.guild else 'dm'}:{message.channel.id}"
+        session_id = _build_session_id(message, self.runtime.runtime_cfg.session_id_strategy)
         user_id = f"discord:{message.author.id}"
         role_ids = _extract_role_ids(message)
 
@@ -995,9 +1085,18 @@ class DiscordAgentBot(commands.Bot):
         except ToolPermissionError as exc:
             await message.channel.send(str(exc)[:1900])
             return
-        except Exception as exc:  # noqa: BLE001
-            error_msg = f"Error: {exc}"
-            await message.channel.send(error_msg[:1900])
+        except Exception:  # noqa: BLE001
+            error_id = uuid4().hex[:12]
+            logger.exception(
+                "Discord request failed error_id=%s guild=%s channel=%s user=%s",
+                error_id,
+                message.guild.id if message.guild else "dm",
+                message.channel.id,
+                message.author.id,
+            )
+            await message.channel.send(
+                f"Something went wrong while processing your request. Reference ID: `{error_id}`"
+            )
             return
 
         self.last_active_channel_id = message.channel.id

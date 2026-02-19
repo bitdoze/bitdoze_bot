@@ -10,6 +10,11 @@ model:
 
 discord:
     token_env: DISCORD_BOT_TOKEN
+    access_control:
+        allowed_user_ids: [] # when non-empty, only these users can invoke the bot
+        allowed_channel_ids: [] # when non-empty, only these channels can invoke the bot
+        allowed_guild_ids: [] # when non-empty, only these guilds can invoke the bot
+        allowed_role_ids: [] # optional role gate for guild messages
 
 runtime:
     agent_timeout: 600 # seconds, max time for a single agent.run (Discord messages, research)
@@ -19,6 +24,7 @@ runtime:
     slow_run_threshold_seconds: 45 # send a "still working" message if a run exceeds this, 0 disables
     streaming_enabled: true # stream responses to Discord (edit message as content arrives)
     streaming_edit_interval: 1.5 # seconds between Discord message edits during streaming
+    session_id_strategy: channel_user # channel | user | channel_user
 
 monitoring:
     telemetry_enabled: true
@@ -171,6 +177,9 @@ context:
     add_datetime: true
     timezone_identifier: Europe/Bucharest
     use_workspace_context_files: true
+    scope_workspace_context_by_tenant: true # isolate USER/memory/MEMORY by guild+user or DM user
+    scoped_context_dir: workspace/context
+    allow_global_context_in_guilds: false # used only when scope_workspace_context_by_tenant=false
     agents_path: workspace/AGENTS.md
     user_path: workspace/USER.md
     memory_dir: workspace/memory

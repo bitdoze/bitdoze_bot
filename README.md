@@ -115,6 +115,7 @@ Edit `~/.bitdoze-bot/config.yaml` (or `config.yml` if that is your active file):
 
 ### Discord & Streaming
 - `discord`: bot token env var
+- `discord.access_control`: optional ingress allowlists (`allowed_user_ids`, `allowed_channel_ids`, `allowed_guild_ids`, `allowed_role_ids`)
 - `runtime.streaming_enabled`: stream responses to Discord with real-time message edits (default: `true`)
 - `runtime.streaming_edit_interval`: seconds between message edits during streaming (default: `1.5`)
 
@@ -123,6 +124,7 @@ Streaming progressively edits the Discord message as the agent generates content
 ### Runtime
 - `runtime`: timeouts for agent runs, cron, heartbeat, and max concurrency
 - `runtime.slow_run_threshold_seconds`: sends an interim "still working" reply when complex runs take longer than expected
+- `runtime.session_id_strategy`: session partitioning for runs/history (`channel`, `user`, `channel_user`; default: `channel_user`)
 
 ### Knowledge Base
 - `knowledge.enabled`: activate vector search knowledge base
@@ -247,6 +249,9 @@ Notes:
 - `context.agents_path`: load workspace instructions into system context
 - `context.user_path` + `context.memory_dir` + `context.long_memory_path`: load USER + daily memory + long memory
 - `context.main_session_scope`: `dm_only` (default) or `always` for long memory
+- `context.scope_workspace_context_by_tenant`: isolate workspace context files by guild/user (default: `true`)
+- `context.scoped_context_dir`: root folder for tenant-isolated context files (default: `workspace/context`)
+- `context.allow_global_context_in_guilds`: if `false`, global USER/MEMORY files are not injected in guild messages when tenant scoping is disabled
 
 ### Learning Modes (Agno)
 Configure learning in `config.yaml`:

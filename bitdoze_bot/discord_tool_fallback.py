@@ -89,13 +89,8 @@ async def run_tool_calls(
                 continue
 
             declared_fn = declared_funcs.get(func_name)
-            entrypoint = getattr(declared_fn, "entrypoint", None)
-            if callable(entrypoint):
-                target = entrypoint
-                break
-
             fn = getattr(tool, func_name, None)
-            if callable(fn):
+            if declared_fn is not None and callable(fn):
                 target = fn
                 break
         if target is None:

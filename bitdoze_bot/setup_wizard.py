@@ -311,6 +311,11 @@ def _write_env_file(path: Path, updates: dict[str, str]) -> None:
     for key in order:
         lines.append(f"{key}={merged.get(key, '')}")
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        # Best effort for platforms/filesystems that do not support POSIX modes.
+        pass
 
 
 def _ensure_home_dirs(home_dir: Path) -> None:

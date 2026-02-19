@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
@@ -298,3 +299,11 @@ def test_setup_pgvector_runs_without_sudo_when_socket_is_writable(
             "-d",
         ]
     ]
+
+
+def test_write_env_file_enforces_strict_permissions(tmp_path: Path) -> None:
+    if os.name == "nt":
+        return
+    env_path = tmp_path / ".env"
+    setup_wizard._write_env_file(env_path, {"DISCORD_BOT_TOKEN": "secret"})
+    assert (env_path.stat().st_mode & 0o777) == 0o600

@@ -84,7 +84,7 @@ def test_handle_toolcall_fallback_reports_no_output_without_summarizer(monkeypat
     assert "run_shell_command" in out
 
 
-def test_run_tool_calls_uses_declared_entrypoint_when_attr_missing() -> None:
+def test_run_tool_calls_skips_declared_entrypoint_when_wrapped_attr_missing() -> None:
     class DummyTool:
         _bitdoze_tool_name = "shell"
 
@@ -99,6 +99,32 @@ def test_run_tool_calls_uses_declared_entrypoint_when_attr_missing() -> None:
 
     calls = [{"name": "run_shell_command", "params": {"args": ["docker", "ps"]}}]
     results = asyncio.run(_run_tool_calls(DummyAgent(), calls, denied_tools=set()))
+    assert results == []
+
+
+def test_run_tool_calls_prefers_wrapped_method_over_declared_entrypoint() -> None:
+    called = {"entrypoint": False, "wrapped": False}
+
+    class DummyTool:
+        _bitdoze_tool_name = "shell"
+
+        def get_functions(self):
+            def _entrypoint(**_kwargs):
+                called["entrypoint"] = True
+                return "entrypoint-called"
+
+            return {"run_shell_command": SimpleNamespace(entrypoint=_entrypoint)}
+
+        def run_shell_command(self, **_kwargs):
+            called["wrapped"] = True
+            raise PermissionError("blocked")
+
+    class DummyAgent:
+        tools = [DummyTool()]
+
+    calls = [{"name": "run_shell_command", "params": {"args": ["docker", "ps"]}}]
+    results = asyncio.run(_run_tool_calls(DummyAgent(), calls, denied_tools=set()))
+    assert called == {"entrypoint": False, "wrapped": True}
     assert len(results) == 1
     assert results[0]["name"] == "run_shell_command"
-    assert "docker" in results[0]["output"]
+    assert "blocked" in results[0]["output"]
