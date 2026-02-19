@@ -1,37 +1,43 @@
 services:
-  pgvector:
-    image: pgvector/pgvector:pg17
-    container_name: bitdoze-pgvector
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: bitdoze
-      POSTGRES_USER: bitdoze
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bitdoze_secret}
-    ports:
-      - "${PGVECTOR_PORT:-5532}:5432"
-    volumes:
-      - ${BITDOZE_BOT_HOME:-/home/dragos/.bitdoze-bot}/data/pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bitdoze -d bitdoze"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    pgvector:
+        image: pgvector/pgvector:pg17
+        container_name: bitdoze-pgvector
+        restart: unless-stopped
+        environment:
+            POSTGRES_DB: bitdoze
+            POSTGRES_USER: bitdoze
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bitdoze_secret}
+        ports:
+            - "127.0.0.1:${PGVECTOR_PORT:-5532}:5432"
+        volumes:
+            - ${BITDOZE_BOT_HOME:-/home/dragos/.bitdoze-bot}/data/pgdata:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U bitdoze -d bitdoze"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
-  cognee:
-    image: cognee/cognee:latest
-    container_name: cognee
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8000:8000"
-    environment:
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      ENABLE_BACKEND_ACCESS_CONTROL: "false"
-      REQUIRE_AUTHENTICATION: "false"
-    volumes:
-      - ${BITDOZE_BOT_HOME:-/home/dragos/.bitdoze-bot}/data/cognee:/app/cognee/.cognee_system
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    cognee:
+        image: cognee/cognee:latest
+        container_name: cognee
+        restart: unless-stopped
+        ports:
+            - "127.0.0.1:8000:8000"
+        environment:
+            LLM_API_KEY: ${LLM_API_KEY:-}
+            ENABLE_BACKEND_ACCESS_CONTROL: "false"
+            REQUIRE_AUTHENTICATION: "false"
+        volumes:
+            - ${BITDOZE_BOT_HOME:-/home/dragos/.bitdoze-bot}/data/cognee:/app/cognee/.cognee_system
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "python3",
+                    "-c",
+                    "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 40s
