@@ -4,20 +4,23 @@ import asyncio
 import logging
 import os
 import re
+from uuid import uuid4
+from functools import lru_cache
 from time import perf_counter
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
-import json
 from dataclasses import dataclass
 from typing import Any, cast
 
 import discord
 from discord.ext import commands, tasks
 
-from agno.run.agent import Message, RunEvent, RunContentEvent, RunOutput
-from agno.team import Team
+from agno.run.agent import RunEvent, RunOutput
+from agno.run.cancel import cancel_run as _cancel_run_global
 
 from bitdoze_bot.agents import AgentRegistry, build_agents
+from bitdoze_bot.cognee import CogneeClient, CogneeConfig, load_cognee_config
 from bitdoze_bot.config import Config, load_config
 from bitdoze_bot.cron import (
     build_cron_trigger,
@@ -30,6 +33,20 @@ from bitdoze_bot.heartbeat import (
     build_heartbeat_prompt,
     load_heartbeat_config,
     run_heartbeat,
+)
+from bitdoze_bot.discord_runtime_utils import (
+    build_response_input as _build_response_input,
+    collect_delegation_paths as _collect_delegation_paths,
+    ensure_token_metrics as _ensure_token_metrics,
+    extract_metrics as _extract_metrics,
+    is_team_target as _is_team_target,
+    needs_completion_retry as _needs_completion_retry,
+    target_members as _target_members,
+)
+from bitdoze_bot.discord_tool_fallback import (
+    parse_tool_calls as _parse_tool_calls,
+    run_tool_calls as _run_tool_calls,
+    strip_tool_call_markup as _strip_tool_call_markup,
 )
 from bitdoze_bot.run_monitor import RunMonitor
 from bitdoze_bot.tool_permissions import ToolPermissionError, tool_runtime_context
@@ -60,6 +77,14 @@ def _safe_positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _parse_non_negative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def load_runtime_config(config: Config) -> RuntimeConfig:
@@ -113,155 +138,88 @@ class DiscordRuntime:
 
 
 @dataclass(frozen=True)
-class ResearchModeConfig:
-    enabled: bool = True
-    trigger_on_prefix: bool = True
-    trigger_on_research_agent: bool = True
-    research_agent_name: str = "research"
-    min_sources: int = 3
+class _CompiledRoutingRule:
+    agent: str | None
+    channel_ids: frozenset[int]
+    user_ids: frozenset[int]
+    guild_ids: frozenset[int]
+    contains: tuple[str, ...]
+    starts_with: tuple[str, ...]
 
 
 @dataclass(frozen=True)
-class ResearchValidationResult:
-    valid: bool
-    missing_sections: tuple[str, ...]
-    source_count: int
-    min_sources: int
+class _ContextSettings:
+    use_workspace_context_files: bool
+    user_path: Path
+    memory_dir: Path
+    long_memory_path: Path
+    main_session_scope: str
+    tzinfo: ZoneInfo
 
 
-_RESEARCH_REQUIRED_SECTIONS = ("TL;DR", "Findings", "Risks", "Sources")
-_RESEARCH_FAILURE_MESSAGE = (
-    "I couldn't produce a valid research response in the required format. "
-    "Please retry with a narrower topic or clearer request."
-)
+def _coerce_int_set(values: Any) -> frozenset[int]:
+    if not isinstance(values, list):
+        return frozenset()
+    parsed: set[int] = set()
+    for value in values:
+        try:
+            parsed.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return frozenset(parsed)
 
 
-def _parse_non_negative_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed >= 0 else default
+def _normalize_tokens(values: Any) -> tuple[str, ...]:
+    if not isinstance(values, list):
+        return ()
+    return tuple(str(value).lower() for value in values if str(value).strip())
 
 
-def _load_research_mode_config(config: Config) -> ResearchModeConfig:
-    raw = config.get("research_mode", default={})
-    cfg = raw if isinstance(raw, dict) else {}
-    return ResearchModeConfig(
-        enabled=parse_bool(cfg.get("enabled", True), True),
-        trigger_on_prefix=parse_bool(cfg.get("trigger_on_prefix", True), True),
-        trigger_on_research_agent=parse_bool(cfg.get("trigger_on_research_agent", True), True),
-        research_agent_name=str(cfg.get("research_agent_name", "research")).strip() or "research",
-        min_sources=max(_parse_non_negative_int(cfg.get("min_sources", 3), 3), 1),
-    )
-
-
-def _is_research_prefixed(content: str) -> bool:
-    return content.lower().startswith("research:")
-
-
-def _strip_research_prefix(content: str) -> str:
-    if not _is_research_prefixed(content):
-        return content.strip()
-    return content[len("research:") :].strip()
-
-
-def _is_research_mode_request(
-    cfg: ResearchModeConfig,
-    content: str,
-    selected_target_name: str | None,
-) -> bool:
-    if not cfg.enabled:
-        return False
-    by_prefix = cfg.trigger_on_prefix and _is_research_prefixed(content)
-    by_target = (
-        cfg.trigger_on_research_agent
-        and bool(selected_target_name)
-        and str(selected_target_name).strip().lower() == cfg.research_agent_name.lower()
-    )
-    return by_prefix or by_target
-
-
-def _build_research_prompt(query: str, min_sources: int) -> str:
-    return (
-        "Research request:\n"
-        f"{query.strip()}\n\n"
-        "Return exactly these sections in this order:\n"
-        "TL;DR\n"
-        "Findings\n"
-        "Risks\n"
-        "Sources\n\n"
-        "Requirements:\n"
-        f"- In Sources, include at least {min_sources} unique http(s) URLs.\n"
-        "- Keep Findings and Risks concise bullet lists.\n"
-    )
-
-
-def _section_header_pattern(section: str) -> re.Pattern[str]:
-    return re.compile(
-        rf"^\s*(?:#+\s*)?{re.escape(section)}\s*:?\s*$|^\s*(?:#+\s*)?{re.escape(section)}\s*:\s+\S",
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-
-
-def _extract_sources_block(text: str) -> str:
-    sources_start = re.search(r"(?im)^\s*(?:#+\s*)?Sources\s*:?", text)
-    if not sources_start:
-        return ""
-    return text[sources_start.end() :]
-
-
-def _extract_unique_http_urls(text: str) -> set[str]:
-    raw_urls = re.findall(r"https?://\S+", text, flags=re.IGNORECASE)
-    cleaned: set[str] = set()
-    for url in raw_urls:
-        cleaned.add(url.rstrip(".,);:!?]}'\""))
-    return cleaned
-
-
-def _validate_research_response(text: str, min_sources: int) -> ResearchValidationResult:
-    missing_sections: list[str] = []
-    for section in _RESEARCH_REQUIRED_SECTIONS:
-        if not _section_header_pattern(section).search(text):
-            missing_sections.append(section)
-    sources_block = _extract_sources_block(text)
-    unique_urls = _extract_unique_http_urls(sources_block)
-    valid = not missing_sections and len(unique_urls) >= min_sources
-    return ResearchValidationResult(
-        valid=valid,
-        missing_sections=tuple(missing_sections),
-        source_count=len(unique_urls),
-        min_sources=min_sources,
-    )
-
-
-def _build_research_retry_prompt(query: str, validation: ResearchValidationResult) -> str:
-    issues: list[str] = []
-    if validation.missing_sections:
-        issues.append("missing sections: " + ", ".join(validation.missing_sections))
-    if validation.source_count < validation.min_sources:
-        issues.append(
-            f"insufficient source URLs in Sources: {validation.source_count}/{validation.min_sources}"
+def _compile_routing_rules(config: Config) -> tuple[_CompiledRoutingRule, ...]:
+    routing = config.get("agents", "routing", default={})
+    rules = routing.get("rules", []) if isinstance(routing, dict) else []
+    compiled: list[_CompiledRoutingRule] = []
+    for raw_rule in rules or []:
+        if not isinstance(raw_rule, dict):
+            continue
+        compiled.append(
+            _CompiledRoutingRule(
+                agent=cast(str | None, raw_rule.get("agent")),
+                channel_ids=_coerce_int_set(raw_rule.get("channel_ids")),
+                user_ids=_coerce_int_set(raw_rule.get("user_ids")),
+                guild_ids=_coerce_int_set(raw_rule.get("guild_ids")),
+                contains=_normalize_tokens(raw_rule.get("contains")),
+                starts_with=_normalize_tokens(raw_rule.get("starts_with")),
+            )
         )
-    issue_summary = "; ".join(issues) if issues else "format mismatch"
-    return (
-        "Retry the research answer and strictly follow this format.\n"
-        f"Validation issues: {issue_summary}\n\n"
-        "Return exactly these sections in this order:\n"
-        "TL;DR\n"
-        "Findings\n"
-        "Risks\n"
-        "Sources\n\n"
-        "Requirements:\n"
-        f"- Sources must include at least {validation.min_sources} unique http(s) URLs.\n"
-        "- Do not include any extra sections.\n\n"
-        f"Research request:\n{query.strip()}\n"
+    return tuple(compiled)
+
+
+def _load_context_settings(config: Config) -> _ContextSettings:
+    context_cfg = config.get("context", default={})
+    cfg = context_cfg if isinstance(context_cfg, dict) else {}
+    tz_name = cfg.get("timezone_identifier", "UTC")
+    try:
+        tzinfo = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001
+        tzinfo = ZoneInfo("UTC")
+    return _ContextSettings(
+        use_workspace_context_files=bool(cfg.get("use_workspace_context_files", True)),
+        user_path=config.resolve_path(cfg.get("user_path"), default="workspace/USER.md"),
+        memory_dir=config.resolve_path(cfg.get("memory_dir"), default="workspace/memory"),
+        long_memory_path=config.resolve_path(cfg.get("long_memory_path"), default="workspace/MEMORY.md"),
+        main_session_scope=str(cfg.get("main_session_scope", "dm_only")),
+        tzinfo=tzinfo,
     )
+
+
+@lru_cache(maxsize=8)
+def _bot_mention_pattern(bot_user_id: int) -> re.Pattern[str]:
+    return re.compile(rf"<@!?{bot_user_id}>")
 
 
 def _strip_bot_mention(content: str, bot_user_id: int) -> str:
-    pattern = re.compile(rf"<@!?{bot_user_id}>")
-    cleaned = pattern.sub("", content)
+    cleaned = _bot_mention_pattern(bot_user_id).sub("", content)
     return cleaned.strip()
 
 
@@ -277,204 +235,6 @@ def _parse_agent_hint(content: str) -> tuple[str | None, str]:
     return None, content
 
 
-def _build_response_input(user_context: str | None, content: str) -> list[Message] | str:
-    file_task_hint = (
-        "For local file/code operations, use the 'file' tool functions "
-        "(list_files, search_files, read_file, read_file_chunk, save_file, replace_file_chunk) "
-        "instead of shell or github tools. File paths are relative to the workspace root, "
-        "so use 'USER.md' (not 'workspace/USER.md'). Use save_file(contents=..., file_name=...)."
-    )
-    lower_content = content.lower()
-    file_keywords = (
-        "file",
-        "folder",
-        "directory",
-        "read ",
-        "open ",
-        "edit ",
-        "update ",
-        "change ",
-        "rewrite ",
-        "search in",
-        "find in",
-        "codebase",
-        ".py",
-        ".js",
-        ".ts",
-        ".md",
-        ".yaml",
-        ".yml",
-        ".json",
-    )
-    needs_file_hint = any(token in lower_content for token in file_keywords)
-
-    if user_context:
-        messages: list[Message] = [Message(role="system", content=user_context)]
-        if needs_file_hint:
-            messages.append(Message(role="system", content=file_task_hint))
-        messages.append(Message(role="user", content=content))
-        return messages
-    if needs_file_hint:
-        return [
-            Message(role="system", content=file_task_hint),
-            Message(role="user", content=content),
-        ]
-    return content
-
-
-def _is_team_target(target: Any) -> bool:
-    return isinstance(target, Team)
-
-
-def _target_members(target: Any) -> list[str]:
-    names: list[str] = []
-    for member in getattr(target, "members", None) or []:
-        names.append(_agent_name(member, "unknown"))
-    return names
-
-
-def _extract_metrics(metrics: Any) -> dict[str, Any]:
-    if metrics is None:
-        return {}
-    # RunOutput carries primary metrics on `.metrics`; extract from there first.
-    if not isinstance(metrics, dict):
-        nested_metrics = getattr(metrics, "metrics", None)
-        if nested_metrics is not None and nested_metrics is not metrics:
-            snapshot = _extract_metrics(nested_metrics)
-        else:
-            snapshot = {}
-    else:
-        snapshot = {}
-
-    # Aggregate token usage across model requests when available (useful for
-    # streaming + tool calls where final response metrics may be partial/missing).
-    events = getattr(metrics, "events", None)
-    if isinstance(events, list):
-        input_sum = 0
-        output_sum = 0
-        total_sum = 0
-        seen = False
-        for event in events:
-            in_tok = getattr(event, "input_tokens", None)
-            out_tok = getattr(event, "output_tokens", None)
-            tot_tok = getattr(event, "total_tokens", None)
-            if in_tok is None and out_tok is None and tot_tok is None:
-                continue
-            seen = True
-            input_sum += int(in_tok or 0)
-            output_sum += int(out_tok or 0)
-            total_sum += int(tot_tok or 0)
-        if seen:
-            if input_sum > 0:
-                snapshot["input_tokens"] = input_sum
-            if output_sum > 0:
-                snapshot["output_tokens"] = output_sum
-            if total_sum > 0:
-                snapshot["total_tokens"] = total_sum
-            snapshot["token_source"] = "events"
-
-    usage = getattr(metrics, "usage", None)
-    if isinstance(metrics, dict):
-        usage = metrics.get("usage", usage)
-        provider_data = metrics.get("model_provider_data")
-    else:
-        provider_data = getattr(metrics, "model_provider_data", None)
-    if isinstance(provider_data, dict):
-        usage = provider_data.get("usage", usage)
-        if usage is None and isinstance(provider_data.get("response"), dict):
-            usage = provider_data["response"].get("usage")
-    field_aliases: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("input_tokens", ("input_tokens", "prompt_tokens")),
-        ("output_tokens", ("output_tokens", "completion_tokens")),
-        ("total_tokens", ("total_tokens",)),
-        ("latency", ("latency",)),
-        ("time_to_first_token", ("time_to_first_token",)),
-    )
-    for normalized_key, candidates in field_aliases:
-        value = None
-        for key in candidates:
-            if isinstance(metrics, dict):
-                value = metrics.get(key)
-            else:
-                value = getattr(metrics, key, None)
-            if value is not None:
-                break
-            if isinstance(usage, dict):
-                value = usage.get(key)
-            elif usage is not None:
-                value = getattr(usage, key, None)
-            if value is not None:
-                break
-        if value is not None:
-            snapshot[normalized_key] = value
-    if (
-        "total_tokens" not in snapshot
-        and "input_tokens" in snapshot
-        and "output_tokens" in snapshot
-    ):
-        try:
-            snapshot["total_tokens"] = int(snapshot["input_tokens"]) + int(snapshot["output_tokens"])
-        except (TypeError, ValueError):
-            pass
-    return snapshot
-
-
-def _estimate_tokens_from_text(value: str) -> int:
-    text = value.strip()
-    if not text:
-        return 0
-    # Simple fallback heuristic when provider usage is unavailable.
-    return max(1, (len(text) + 3) // 4)
-
-
-def _estimate_input_tokens(response_input: Any) -> int:
-    if isinstance(response_input, str):
-        return _estimate_tokens_from_text(response_input)
-    if isinstance(response_input, list):
-        parts: list[str] = []
-        for item in response_input:
-            content = getattr(item, "content", None)
-            if isinstance(content, str):
-                parts.append(content)
-        return _estimate_tokens_from_text("\n".join(parts))
-    return _estimate_tokens_from_text(str(response_input))
-
-
-def _ensure_token_metrics(metrics: dict[str, Any], response_input: Any, output_text: str) -> dict[str, Any]:
-    merged = dict(metrics)
-    if (
-        merged.get("input_tokens") is None
-        or merged.get("output_tokens") is None
-        or merged.get("total_tokens") is None
-    ):
-        in_tokens = _estimate_input_tokens(response_input)
-        out_tokens = _estimate_tokens_from_text(output_text)
-        merged["input_tokens"] = in_tokens
-        merged["output_tokens"] = out_tokens
-        merged["total_tokens"] = in_tokens + out_tokens
-        merged["token_estimated"] = True
-    else:
-        merged["token_estimated"] = False
-    return merged
-
-
-def _collect_delegation_paths(node: Any, prefix: str = "") -> list[str]:
-    node_name = (
-        getattr(node, "team_name", None)
-        or getattr(node, "agent_name", None)
-        or getattr(node, "name", None)
-        or "unknown"
-    )
-    current = f"{prefix}->{node_name}" if prefix else str(node_name)
-    member_responses = getattr(node, "member_responses", None) or []
-    if not member_responses:
-        return [current]
-    paths: list[str] = []
-    for child in member_responses:
-        paths.extend(_collect_delegation_paths(child, current))
-    return paths
-
-
 _run_semaphore: asyncio.Semaphore | None = None
 _run_semaphore_size: int | None = None
 
@@ -485,6 +245,14 @@ def _get_run_semaphore(max_concurrent: int = 4) -> asyncio.Semaphore:
         _run_semaphore = asyncio.Semaphore(max_concurrent)
         _run_semaphore_size = max_concurrent
     return _run_semaphore
+
+
+def _cancel_run(run_id: str) -> bool:
+    try:
+        return bool(_cancel_run_global(run_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to cancel run run_id=%s error=%s", run_id, exc)
+        return False
 
 
 async def _run_agent(
@@ -518,18 +286,37 @@ async def _run_agent(
         ", ".join(members) if members else "none",
     )
     started_at = perf_counter()
+    run_id = f"discord-{uuid4().hex}"
+    run_task: asyncio.Task[Any] | None = None
     try:
         async with _get_run_semaphore(cfg.max_concurrent_runs):
-            response = await asyncio.wait_for(
+            run_task = asyncio.create_task(
                 asyncio.to_thread(
                     agent.run,
                     response_input,
                     user_id=user_id,
                     session_id=session_id,
+                    run_id=run_id,
                 ),
+            )
+            response = await asyncio.wait_for(
+                asyncio.shield(run_task),
                 timeout=cfg.agent_timeout,
             )
     except TimeoutError as exc:
+        cancelled = _cancel_run(run_id)
+        logger.warning(
+            "Target run timed out kind=%s name=%s run_id=%s cancel_requested=%s",
+            target_kind,
+            target_name,
+            run_id,
+            cancelled,
+        )
+        if run_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(run_task), timeout=3)
+            except Exception:  # noqa: BLE001
+                pass
         if cfg.monitor is not None:
             cfg.monitor.finish(
                 monitor_token,
@@ -586,7 +373,7 @@ async def _run_agent(
     return output_text
 
 
-def _iter_stream_in_thread(agent, response_input, user_id: str, session_id: str):
+def _iter_stream_in_thread(agent, response_input, user_id: str, session_id: str, run_id: str):
     """Run agent.run(stream=True) in a thread and yield events via a queue."""
     import queue as queue_mod
 
@@ -595,7 +382,11 @@ def _iter_stream_in_thread(agent, response_input, user_id: str, session_id: str)
     def _produce():
         try:
             for event in agent.run(
-                response_input, stream=True, user_id=user_id, session_id=session_id
+                response_input,
+                stream=True,
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
             ):
                 q.put(event)
         except Exception as exc:  # noqa: BLE001
@@ -634,11 +425,16 @@ async def _run_agent_streaming(
     last_edit_time: float = 0
     edit_interval = cfg.streaming_edit_interval
     final_response: Any = None
+    run_id = f"discord-{uuid4().hex}"
 
     try:
         async with _get_run_semaphore(cfg.max_concurrent_runs):
             q, produce = _iter_stream_in_thread(
-                agent, response_input, user_id, session_id
+                agent,
+                response_input,
+                user_id,
+                session_id,
+                run_id,
             )
             loop = asyncio.get_event_loop()
             thread = loop.run_in_executor(None, produce)
@@ -646,6 +442,7 @@ async def _run_agent_streaming(
             deadline = loop.time() + cfg.agent_timeout
             while True:
                 if loop.time() > deadline:
+                    _cancel_run(run_id)
                     raise TimeoutError("agent timeout")
                 try:
                     import queue as queue_mod
@@ -691,6 +488,12 @@ async def _run_agent_streaming(
 
             await thread
     except TimeoutError as exc:
+        logger.warning(
+            "Target run timed out kind=%s name=%s run_id=%s cancel_requested=true",
+            "agent",
+            target_name,
+            run_id,
+        )
         if cfg.monitor is not None:
             cfg.monitor.finish(monitor_token, status="timeout", error=str(exc) or "agent timeout")
         raise
@@ -785,6 +588,24 @@ def _match_rule(rule: dict[str, Any], message: discord.Message) -> bool:
     return True
 
 
+def _match_compiled_rule(
+    rule: _CompiledRoutingRule,
+    message: discord.Message,
+    lower_content: str,
+) -> bool:
+    if rule.channel_ids and message.channel.id not in rule.channel_ids:
+        return False
+    if rule.user_ids and message.author.id not in rule.user_ids:
+        return False
+    if message.guild is not None and rule.guild_ids and message.guild.id not in rule.guild_ids:
+        return False
+    if rule.contains and not any(token in lower_content for token in rule.contains):
+        return False
+    if rule.starts_with and not any(lower_content.startswith(token) for token in rule.starts_with):
+        return False
+    return True
+
+
 def _select_agent_name(
     config: Config,
     message: discord.Message,
@@ -803,51 +624,50 @@ def _select_agent_name(
     return None
 
 
-def _build_user_context(config: Config, message: discord.Message) -> str:
-    context_cfg = config.get("context", default={})
-    use_workspace_context_files = bool(context_cfg.get("use_workspace_context_files", True))
-    if not use_workspace_context_files:
+def _select_agent_name_compiled(
+    compiled_rules: tuple[_CompiledRoutingRule, ...],
+    message: discord.Message,
+) -> str | None:
+    lower_content = (message.content or "").lower()
+    for rule in compiled_rules:
+        if _match_compiled_rule(rule, message, lower_content):
+            return rule.agent
+    return None
+
+
+def _build_user_context_from_settings(settings: _ContextSettings, message: discord.Message) -> str:
+    if not settings.use_workspace_context_files:
         return ""
 
-    user_path = config.resolve_path(context_cfg.get("user_path"), default="workspace/USER.md")
-    memory_dir = config.resolve_path(context_cfg.get("memory_dir"), default="workspace/memory")
-    long_memory_path = config.resolve_path(
-        context_cfg.get("long_memory_path"),
-        default="workspace/MEMORY.md",
-    )
-    main_session_scope = context_cfg.get("main_session_scope", "dm_only")
-    tz_name = context_cfg.get("timezone_identifier", "UTC")
-
-    try:
-        tzinfo = ZoneInfo(tz_name)
-    except Exception:  # noqa: BLE001
-        tzinfo = ZoneInfo("UTC")
-
-    today = datetime.now(tzinfo).date()
+    today = datetime.now(settings.tzinfo).date()
     yesterday = today - timedelta(days=1)
 
     sections: list[str] = []
-    user_text = read_text_if_exists(user_path)
+    user_text = read_text_if_exists(settings.user_path)
     if user_text:
         sections.append("USER:\n" + user_text)
 
-    if memory_dir.exists():
+    if settings.memory_dir.exists():
         for day in (yesterday, today):
-            daily_path = memory_dir / f"{day.isoformat()}.md"
+            daily_path = settings.memory_dir / f"{day.isoformat()}.md"
             daily_text = read_text_if_exists(daily_path)
             if daily_text:
                 sections.append(f"DAILY {day.isoformat()}:\n{daily_text}")
 
     include_long_memory = (
-        main_session_scope == "always"
-        or (main_session_scope == "dm_only" and message.guild is None)
+        settings.main_session_scope == "always"
+        or (settings.main_session_scope == "dm_only" and message.guild is None)
     )
     if include_long_memory:
-        long_memory_text = read_text_if_exists(long_memory_path)
+        long_memory_text = read_text_if_exists(settings.long_memory_path)
         if long_memory_text:
             sections.append("MEMORY:\n" + long_memory_text)
 
     return "\n\n".join(sections).strip()
+
+
+def _build_user_context(config: Config, message: discord.Message) -> str:
+    return _build_user_context_from_settings(_load_context_settings(config), message)
 
 
 def _extract_role_ids(message: discord.Message) -> list[int]:
@@ -867,6 +687,16 @@ class DiscordAgentBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.runtime = runtime
         self.last_active_channel_id: int | None = None
+        self._routing_rules = _compile_routing_rules(runtime.config)
+        self._context_settings = _load_context_settings(runtime.config)
+        self._toolkit_log_cache: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {}
+        self._cognee_cfg: CogneeConfig = load_cognee_config(runtime.config)
+        self._cognee_client: CogneeClient | None = (
+            CogneeClient(self._cognee_cfg) if self._cognee_cfg.enabled else None
+        )
+        self._cognee_recall_failures = 0
+        self._cognee_recall_backoff_until = 0.0
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
         self.heartbeat_cfg = load_heartbeat_config(runtime.config)
         self._heartbeat_loop = tasks.loop(minutes=self.heartbeat_cfg.interval_minutes)(
@@ -880,6 +710,117 @@ class DiscordAgentBot(commands.Bot):
         except FileNotFoundError:
             self._cron_last_mtime = None
         self._cron_watch_loop = tasks.loop(minutes=10)(self._cron_watch_tick)
+
+    def _log_agent_toolkit_once(self, agent_name: str, agent: Any) -> None:
+        if not logger.isEnabledFor(logging.INFO):
+            return
+        tools = getattr(agent, "tools", None) or []
+        snapshot: list[tuple[str, tuple[str, ...]]] = []
+        for tool in tools:
+            tool_name = str(getattr(tool, "name", tool.__class__.__name__))
+            if hasattr(tool, "get_functions"):
+                functions = tuple(sorted(tool.get_functions().keys()))
+            else:
+                functions = ()
+            snapshot.append((tool_name, functions))
+        current = tuple(snapshot)
+        if self._toolkit_log_cache.get(agent_name) == current:
+            return
+        self._toolkit_log_cache[agent_name] = current
+        for tool_name, functions in current:
+            logger.info(
+                "Agent %s toolkit %s functions: %s",
+                agent_name,
+                tool_name,
+                ", ".join(functions) or "none",
+            )
+
+    def _schedule_conversation_sync(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+        agent_name: str,
+        channel_id: int,
+        guild_id: int | None,
+    ) -> None:
+        if self._cognee_client is None or not self._cognee_cfg.auto_sync_conversations:
+            return
+        client = self._cognee_client
+
+        async def _sync() -> None:
+            try:
+                await asyncio.to_thread(
+                    client.save_conversation_turn,
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=user_message,
+                    assistant_message=assistant_message,
+                    agent_name=agent_name,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Cognee conversation sync failed: %s", exc)
+
+        task = asyncio.create_task(_sync())
+        self._background_tasks.add(task)
+        task.add_done_callback(lambda t: self._background_tasks.discard(t))
+
+    async def _build_cognee_context_block(self, query: str) -> str:
+        if self._cognee_client is None or not self._cognee_cfg.auto_recall_enabled:
+            return ""
+        client = self._cognee_client
+        loop = asyncio.get_running_loop()
+        if loop.time() < self._cognee_recall_backoff_until:
+            return ""
+        search_query = query.strip()
+        if len(search_query) < 3:
+            return ""
+        try:
+            results = await asyncio.to_thread(
+                client.search,
+                search_query,
+                self._cognee_cfg.auto_recall_limit,
+                max_payloads=3,
+                max_paths=3,
+                timeout_seconds=min(self._cognee_cfg.timeout_seconds, 5),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._cognee_recall_failures += 1
+            if self._cognee_recall_failures >= 2:
+                self._cognee_recall_backoff_until = loop.time() + 120
+            logger.warning("Cognee auto-recall failed: %s", exc)
+            return ""
+        self._cognee_recall_failures = 0
+        if not results:
+            return ""
+
+        lines: list[str] = ["COGNEE MEMORY (auto-retrieved):"]
+        total_chars = 0
+        max_chars = self._cognee_cfg.auto_recall_max_chars
+        inject_all = self._cognee_cfg.auto_recall_inject_all
+        for item in results:
+            cleaned = " ".join(item.split())
+            if not cleaned:
+                continue
+            snippet = cleaned if inject_all else cleaned[:420]
+            if not inject_all and total_chars + len(snippet) > max_chars:
+                break
+            lines.append(f"- {snippet}")
+            total_chars += len(snippet)
+        if len(lines) == 1:
+            return ""
+        logger.info(
+            "Cognee auto-recall injected items=%d available=%d inject_all=%s query=%s",
+            len(lines) - 1,
+            len(results),
+            inject_all,
+            search_query[:100],
+        )
+        return "\n".join(lines)
 
     async def setup_hook(self) -> None:
         if self.heartbeat_cfg.enabled:
@@ -903,6 +844,11 @@ class DiscordAgentBot(commands.Bot):
 
     async def close(self) -> None:
         logger.info("Shutting down bot...")
+        for task in list(self._background_tasks):
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
         if self._heartbeat_loop.is_running():
             self._heartbeat_loop.cancel()
         if self._cron_watch_loop.is_running():
@@ -940,11 +886,12 @@ class DiscordAgentBot(commands.Bot):
             return
 
         agent_hint, content = _parse_agent_hint(content)
-        selected_agent = _select_agent_name(self.runtime.config, message, agent_hint)
+        user_prompt = content
+        selected_agent = agent_hint or _select_agent_name_compiled(self._routing_rules, message)
+        if selected_agent is None:
+            selected_agent = _select_agent_name(self.runtime.config, message, None)
         agent = self.runtime.agents.get(selected_agent)
         agent_name = _agent_name(agent, selected_agent)
-        research_cfg = _load_research_mode_config(self.runtime.config)
-        research_mode_active = _is_research_mode_request(research_cfg, content, agent_name)
         logger.info(
             "Active agent for message (guild=%s channel=%s user=%s): %s",
             message.guild.id if message.guild else "dm",
@@ -952,26 +899,7 @@ class DiscordAgentBot(commands.Bot):
             message.author.id,
             agent_name,
         )
-        logger.info(
-            "Research mode active=%s trigger_prefix=%s trigger_research_agent=%s target=%s",
-            research_mode_active,
-            _is_research_prefixed(content),
-            agent_name.strip().lower() == research_cfg.research_agent_name.lower(),
-            research_cfg.research_agent_name,
-        )
-        tools = getattr(agent, "tools", None) or []
-        for tool in tools:
-            tool_name = getattr(tool, "name", tool.__class__.__name__)
-            if hasattr(tool, "get_functions"):
-                tool_functions = sorted(tool.get_functions().keys())
-            else:
-                tool_functions = []
-            logger.info(
-                "Agent %s toolkit %s functions: %s",
-                agent_name,
-                tool_name,
-                ", ".join(tool_functions) or "none",
-            )
+        self._log_agent_toolkit_once(agent_name, agent)
 
         session_id = f"discord:{message.guild.id if message.guild else 'dm'}:{message.channel.id}"
         user_id = f"discord:{message.author.id}"
@@ -989,24 +917,13 @@ class DiscordAgentBot(commands.Bot):
                 agent_name=agent_name,
             ):
                 async with message.channel.typing():
-                    user_context = _build_user_context(self.runtime.config, message)
+                    user_context = _build_user_context_from_settings(self._context_settings, message)
+                    cognee_block = await self._build_cognee_context_block(content)
+                    if cognee_block:
+                        user_context = f"{user_context}\n\n{cognee_block}".strip() if user_context else cognee_block
                     rt_cfg = self.runtime.runtime_cfg
                     streamed_message: discord.Message | None = None
-                    if research_mode_active:
-                        reply = await _await_with_slow_notice(
-                            _run_research_mode(
-                                agent,
-                                content,
-                                user_context,
-                                user_id,
-                                session_id,
-                                research_cfg,
-                                rt_cfg,
-                            ),
-                            message.channel,
-                            rt_cfg.slow_run_threshold_seconds,
-                        )
-                    elif rt_cfg.streaming_enabled and not _is_team_target(agent):
+                    if rt_cfg.streaming_enabled and not _is_team_target(agent):
                         reply, streamed_message = await _run_agent_streaming(
                             agent,
                             content,
@@ -1057,7 +974,7 @@ class DiscordAgentBot(commands.Bot):
                             reply = await _handle_toolcall_fallback(agent, reply, rt_cfg)
         except TimeoutError:
             await message.channel.send(
-                "The request timed out. Please try again with a simpler query."
+                "The request timed out and was cancelled to stop API token usage. Please try again with a simpler query."
             )
             return
         except ToolPermissionError as exc:
@@ -1075,6 +992,15 @@ class DiscordAgentBot(commands.Bot):
                 await _send_chunked(message.channel, reply[1900:])
         else:
             await _send_chunked(message.channel, reply)
+        self._schedule_conversation_sync(
+            user_id=user_id,
+            session_id=session_id,
+            user_message=user_prompt,
+            assistant_message=reply,
+            agent_name=agent_name,
+            channel_id=message.channel.id,
+            guild_id=message.guild.id if message.guild else None,
+        )
 
     async def _heartbeat_tick(self) -> None:
         if not self.heartbeat_cfg.enabled:
@@ -1264,138 +1190,6 @@ async def _await_with_slow_notice(
         return await task
 
 
-def _parse_tool_calls(text: str) -> list[dict[str, Any]]:
-    def _parse_param_value(raw: str) -> Any:
-        value = raw.strip()
-        if value.isdigit():
-            return int(value)
-        try:
-            return json.loads(value)
-        except Exception:
-            return value
-
-    calls: list[dict[str, Any]] = []
-    for block in re.findall(r"<tool_call>(.*?)</tool_call>", text, flags=re.DOTALL):
-        func_match = re.search(r"<function=([a-zA-Z0-9_]+)>", block)
-        if func_match:
-            func_name = func_match.group(1)
-        else:
-            # Supports plain style: <tool_call>fn_name<arg_key>..</arg_key>...</tool_call>
-            plain_name_match = re.match(r"\s*([a-zA-Z_][a-zA-Z0-9_]*)", block)
-            if not plain_name_match:
-                continue
-            func_name = plain_name_match.group(1)
-        params: dict[str, Any] = {}
-
-        for p_match in re.findall(r"<parameter=([a-zA-Z0-9_]+)>(.*?)</parameter>", block, flags=re.DOTALL):
-            key = p_match[0]
-            params[key] = _parse_param_value(p_match[1])
-
-        for p_match in re.finditer(
-            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>",
-            block,
-            flags=re.DOTALL,
-        ):
-            key = p_match.group(1).strip()
-            if not key:
-                continue
-            params[key] = _parse_param_value(p_match.group(2))
-
-        calls.append({"name": func_name, "params": params})
-    return calls
-
-
-def _strip_tool_call_markup(text: str) -> str:
-    cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL).strip()
-    return cleaned
-
-
-def _needs_completion_retry(reply: str) -> bool:
-    text = reply.strip()
-    if not text:
-        return True
-    if len(text) > 260:
-        return False
-    lowered = text.lower()
-    if "<tool_call>" in lowered:
-        return False
-    if lowered.endswith(":"):
-        return True
-    placeholder_prefixes = (
-        "let me ",
-        "i will ",
-        "i'll ",
-        "i am going to ",
-        "i'm going to ",
-        "one moment",
-        "hold on",
-    )
-    return any(lowered.startswith(prefix) for prefix in placeholder_prefixes)
-
-
-def _get_declared_functions(tool: Any) -> set[str]:
-    get_functions = getattr(tool, "get_functions", None)
-    if callable(get_functions):
-        funcs = get_functions()
-        if isinstance(funcs, dict):
-            return set(funcs.keys())
-    return set()
-
-
-async def _run_tool_calls(
-    agent,
-    calls: list[dict[str, Any]],
-    denied_tools: set[str] | None = None,
-) -> list[dict[str, str]]:
-    results: list[dict[str, str]] = []
-    denied = {"shell", "discord"} if denied_tools is None else denied_tools
-    tools = getattr(agent, "tools", None) or []
-    for call in calls:
-        func_name = str(call.get("name", ""))
-        params = cast(dict[str, Any], call.get("params", {}))
-        target = None
-        for tool in tools:
-            tool_name = getattr(tool, "_bitdoze_tool_name", "") or ""
-            if tool_name.lower() in denied:
-                continue
-            get_functions = getattr(tool, "get_functions", None)
-            declared_funcs = get_functions() if callable(get_functions) else {}
-            if not isinstance(declared_funcs, dict):
-                declared_funcs = {}
-            declared = set(declared_funcs.keys())
-            if declared and func_name not in declared:
-                continue
-            if not declared:
-                continue
-
-            # Preferred: call the tool's declared function entrypoint directly.
-            declared_fn = declared_funcs.get(func_name)
-            entrypoint = getattr(declared_fn, "entrypoint", None)
-            if callable(entrypoint):
-                target = entrypoint
-                break
-
-            # Fallback: call method attribute by name when available.
-            fn = getattr(tool, func_name, None)
-            if callable(fn):
-                target = fn
-                break
-        if target is None:
-            logger.warning("Tool fallback: function '%s' not found or denied", func_name)
-            continue
-        try:
-            output = await asyncio.to_thread(target, **params)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Tool fallback: function '%s' failed: %s", func_name, exc)
-            results.append({"name": func_name, "output": f"Error: {exc}"})
-            continue
-        output_text = str(output).strip()
-        if not output_text:
-            output_text = "(no output)"
-        results.append({"name": func_name, "output": output_text})
-    return results
-
-
 async def _handle_toolcall_fallback(
     agent, reply: str, runtime_cfg: RuntimeConfig | None = None
 ) -> str:
@@ -1426,49 +1220,6 @@ async def _handle_toolcall_fallback(
             output = output[:1500].rstrip() + "\n...[truncated]"
         lines.append(f"- {name}:\n{output}")
     return "\n\n".join(lines)
-
-
-async def _run_research_mode(
-    agent,
-    content: str,
-    user_context: str | None,
-    user_id: str,
-    session_id: str,
-    research_cfg: ResearchModeConfig,
-    runtime_cfg: RuntimeConfig | None = None,
-) -> str:
-    query = _strip_research_prefix(content)
-    prompt = _build_research_prompt(query or content, research_cfg.min_sources)
-    reply = await _run_agent(agent, prompt, user_context, user_id, session_id, runtime_cfg)
-    if "<tool_call>" in reply:
-        reply = await _handle_toolcall_fallback(agent, reply, runtime_cfg)
-
-    first_validation = _validate_research_response(reply, research_cfg.min_sources)
-    if first_validation.valid:
-        return reply
-
-    logger.warning(
-        "Research mode validation failed; retrying once missing_sections=%s source_count=%d min_sources=%d",
-        ", ".join(first_validation.missing_sections) or "none",
-        first_validation.source_count,
-        first_validation.min_sources,
-    )
-    retry_prompt = _build_research_retry_prompt(query or content, first_validation)
-    retry_reply = await _run_agent(agent, retry_prompt, user_context, user_id, session_id, runtime_cfg)
-    if "<tool_call>" in retry_reply:
-        retry_reply = await _handle_toolcall_fallback(agent, retry_reply, runtime_cfg)
-
-    second_validation = _validate_research_response(retry_reply, research_cfg.min_sources)
-    if second_validation.valid:
-        return retry_reply
-
-    logger.error(
-        "Research mode retry failed missing_sections=%s source_count=%d min_sources=%d",
-        ", ".join(second_validation.missing_sections) or "none",
-        second_validation.source_count,
-        second_validation.min_sources,
-    )
-    return _RESEARCH_FAILURE_MESSAGE
 
 
 def build_runtime(config_path: str) -> DiscordRuntime:

@@ -13,6 +13,7 @@ A Discord-first AI agent powered by [Agno](https://github.com/agno-agi/agno), wi
 
 ### Memory & Knowledge
 - **Memory** — SQLite-backed with automatic updates, session summaries, and chat history
+- **Cognee memory (optional)** — long-term external memory with conversation chunking, metadata-rich ingestion, and retrieval fallback across payload/path variants
 - **Learning** — Agno LearningMachine per agent (user profile, memory, session context, entity, learned knowledge)
 - **Knowledge base** — vector search with LanceDb (file-based) or PgVector (PostgreSQL) backends
 - **Self-improvement** — discovery tools let the agent save and search its own learnings over time
@@ -158,6 +159,68 @@ Combined with `learned_knowledge: agentic` in learning config, the agent decides
 ### Memory
 - `memory`: `mode: automatic` (best capture), SQLite db path, history + summaries (custom prompt supported)
 - `memory.summary_prompt`: customizable session summary with support for `decisions` and `unresolved` keys
+- `memory.cognee`: optional external long-term memory (Cognee API)
+- `memory.cognee.auto_sync_conversations`: when true, each successful Discord user/assistant turn is stored in Cognee as a compact summary plus chunked user/assistant entries (better semantic recall on long turns)
+- `memory.cognee.auto_recall_enabled`: when true, each incoming message performs Cognee recall and injects top matches into system context
+- Cognee ingestion includes metadata (user/session/agent/channel/guild/timestamps), plus duplicate suppression for recently repeated content
+- Cognee retrieval tries multiple compatible payload/path shapes and skips empty 2xx responses to reduce false misses
+
+Recommended Cognee config:
+
+```yaml
+memory:
+  cognee:
+    enabled: true
+    base_url: http://localhost:8000
+    user: bitdoze-bot@example.com
+    dataset: bitdoze-user-profile
+    auto_sync_conversations: true
+    auto_recall_enabled: true
+    auto_recall_limit: 5
+    auto_recall_max_chars: 2000
+    auto_recall_inject_all: false
+    timeout_seconds: 8
+    max_turn_chars: 6000
+    auth_token_env: COGNEE_API_TOKEN
+```
+
+#### Cognee Troubleshooting (Ingest + Recall)
+
+Use this quick checklist when memory does not appear to work:
+
+1. Verify config is enabled:
+   - `memory.cognee.enabled: true`
+   - `memory.cognee.auto_sync_conversations: true`
+   - `memory.cognee.auto_recall_enabled: true`
+
+2. Verify Cognee API is reachable:
+```bash
+curl -sS http://localhost:8000/api/v1/datasets
+```
+Expected: JSON response (list/object), not connection refused.
+
+3. Verify ingest is happening:
+   - Send one Discord message to the bot and wait for the reply.
+   - Check logs for success lines containing:
+     - `Cognee add_memory success`
+     - `Cognee save_conversation_turn status=ok`
+
+4. Verify recall is happening:
+   - Ask a follow-up question that references the previous message.
+   - Check logs for:
+     - `Cognee search success`
+     - `Cognee auto-recall injected items=...`
+
+5. If recall is weak:
+   - Increase `memory.cognee.auto_recall_limit` (for example `7` to `10`).
+   - Increase `memory.cognee.auto_recall_max_chars` (for example `2500` to `4000`).
+   - Set `memory.cognee.auto_recall_inject_all: true` to inject full matched items (no per-item truncation and no total char cap).
+   - Ensure your question includes clear keywords from the earlier memory.
+
+Notes:
+- Dataset creation retries automatically after transient failures.
+- Conversation turns are stored as a summary plus chunks for better semantic retrieval on long messages.
+- Recent identical memory payloads are deduplicated to reduce noise.
 
 ### Learning
 - `learning`: enable Agno LearningMachine and set learning modes (`always`, `agentic`, `propose`, `hitl`)
@@ -167,9 +230,8 @@ Combined with `learned_knowledge: agentic` in learning config, the agent decides
 - `monitoring`: JSONL telemetry for runs + heartbeat watchdog alerts for long-running active tasks
 - `tool_fallback.denied_tools`: tool names blocked during XML-style fallback execution (default: `shell`, `discord`)
 - `logging`: set level, format, and rotating file settings from YAML
-- `research_mode`: enforce structured research responses and minimum source URLs
 - `tool_permissions`: runtime allow/deny rules for tool use plus JSONL audit logging
-- `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, reddit, discord tools
+- `toolkits`: enable/disable web search, hackernews, website, github, youtube, file, shell, reddit, discord, cognee tools
 - `agents.workspace_dir`: folder-based agent loading from `workspace/agents/<name>/`
 - `teams`: native Agno Team definitions, delegation behavior, team memory options, and default team
 - `heartbeat`: 30-min cadence, optional channel override, `session_scope` (`isolated` to avoid heartbeat history growth), and optional dedicated `agent`
@@ -214,31 +276,6 @@ agents:
 
 Rules match on `channel_ids`, `user_ids`, `guild_ids`, `contains`, and `starts_with`.
 All specified conditions in a rule must match.
-
-## Research Mode
-- Research Mode can be enabled with `research_mode.enabled`.
-- It triggers for:
-  - messages starting with `research:`
-  - messages routed to the configured research agent (default: `research`)
-- It enforces this fixed response schema:
-  - `TL;DR`
-  - `Findings`
-  - `Risks`
-  - `Sources`
-- `Sources` must contain at least `research_mode.min_sources` unique `http(s)` URLs (default: `3`).
-- On validation failure, the bot retries exactly once with stricter format instructions.
-- If retry still fails, it returns a clear error message instead of unstructured output.
-
-Example:
-
-```yaml
-research_mode:
-  enabled: true
-  trigger_on_prefix: true
-  trigger_on_research_agent: true
-  research_agent_name: research
-  min_sources: 3
-```
 
 ## Tool Permissions + Audit
 - Configure runtime tool access with `tool_permissions`.

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from pathlib import Path
+import asyncio
+import time
+
+import pytest
 
 from bitdoze_bot.config import Config
 from bitdoze_bot.discord_bot import (
@@ -11,7 +15,9 @@ from bitdoze_bot.discord_bot import (
     _extract_metrics,
     _needs_completion_retry,
     _parse_agent_hint,
+    _run_agent,
     _select_agent_name,
+    RuntimeConfig,
 )
 
 
@@ -155,3 +161,35 @@ def test_extract_metrics_aggregates_tokens_from_events() -> None:
 def test_needs_completion_retry_for_placeholder_text() -> None:
     assert _needs_completion_retry("Let me check my configuration:")
     assert not _needs_completion_retry("Here are the exact changes and impacts:\n1. ...")
+
+
+def test_run_agent_timeout_requests_cancellation(monkeypatch) -> None:
+    class _SlowAgent:
+        name = "slow"
+
+        def run(self, *_args, **_kwargs):
+            time.sleep(1.2)
+            return SimpleNamespace(content="late")
+
+    cancelled: list[str] = []
+
+    def _fake_cancel(run_id: str) -> bool:
+        cancelled.append(run_id)
+        return True
+
+    monkeypatch.setattr("bitdoze_bot.discord_bot._cancel_run", _fake_cancel)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(
+            _run_agent(
+                _SlowAgent(),
+                "hello",
+                None,
+                "user-1",
+                "session-1",
+                RuntimeConfig(agent_timeout=1),
+            )
+        )
+
+    assert len(cancelled) == 1
+    assert cancelled[0].startswith("discord-")

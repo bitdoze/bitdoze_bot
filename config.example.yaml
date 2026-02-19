@@ -39,13 +39,6 @@ logging:
         max_bytes: 10485760 # 10MB
         backup_count: 5
 
-research_mode:
-    enabled: true
-    trigger_on_prefix: true # activates for messages that start with "research:"
-    trigger_on_research_agent: true # activates when routed target is the research agent
-    research_agent_name: research
-    min_sources: 3 # minimum unique http(s) URLs in Sources
-
 tool_permissions:
     enabled: true
     default_effect: deny # allow | deny (applies when no rule matches)
@@ -88,6 +81,19 @@ memory:
           - unresolved: array of strings — open questions (optional)
         Use lowercase keys exactly as shown. Do not add extra keys or prose.
     summary_request_message: "Return JSON only. Include the required key: summary."
+    cognee:
+        enabled: false
+        base_url: http://localhost:8000
+        user: bitdoze-bot@example.com
+        dataset: bitdoze-user-profile
+        auto_sync_conversations: true
+        auto_recall_enabled: true
+        auto_recall_limit: 5
+        auto_recall_max_chars: 2000
+        auto_recall_inject_all: false
+        timeout_seconds: 8
+        max_turn_chars: 6000
+        auth_token_env: COGNEE_API_TOKEN
 
 knowledge:
     enabled: false # set to true after running setup_knowledge.py
@@ -142,6 +148,8 @@ toolkits:
         user_agent: null
     discord:
         enabled: true
+    cognee:
+        enabled: false
 
 heartbeat:
     enabled: true
@@ -190,11 +198,12 @@ agents:
                   shell,
                   discord,
                   discoveries,
+                  cognee,
               ]
           skills: []
           instructions: ""
         - name: research
-          tools: [web_search, hackernews, website, github, youtube, file, shell, discoveries]
+          tools: [web_search, hackernews, website, github, youtube, file, shell, discoveries, cognee]
           skills: [web-research]
           instructions: ""
         - name: heartbeat

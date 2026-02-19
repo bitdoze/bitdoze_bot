@@ -23,6 +23,7 @@ from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.models.openai.like import OpenAILike
 from agno.session import SessionSummaryManager
 from agno.skills import LocalSkills, SkillLoader, Skills
+from agno.skills.errors import SkillValidationError
 from agno.team import Team
 from agno.tools.discord import DiscordTools
 from agno.tools.reddit import RedditTools
@@ -34,6 +35,8 @@ from agno.tools.websearch import WebSearchTools
 from agno.tools.website import WebsiteTools
 from agno.tools.youtube import YouTubeTools
 
+from bitdoze_bot.cognee import CogneeClient, load_cognee_config
+from bitdoze_bot.cognee_tools import CogneeTools
 from bitdoze_bot.config import Config
 from bitdoze_bot.discovery_tools import DiscoveryTools
 from bitdoze_bot.tool_permissions import ToolPermissionManager, get_tool_runtime_context
@@ -93,11 +96,49 @@ def _build_model(config: Config, overrides: Any = None) -> OpenAILike:
     api_key_env = model_cfg.get("api_key_env", "OPENAI_API_KEY")
     api_key = _require_env(api_key_env)
     structured_outputs = model_cfg.get("structured_outputs", "auto")
+    timeout = model_cfg.get("timeout")
+    max_retries = model_cfg.get("max_retries")
+    retries = model_cfg.get("retries")
+    delay_between_retries = model_cfg.get("delay_between_retries")
+    exponential_backoff = model_cfg.get("exponential_backoff")
+
+    openai_timeout = None
+    if timeout is not None:
+        try:
+            openai_timeout = float(timeout)
+        except (TypeError, ValueError):
+            openai_timeout = None
+
+    openai_max_retries = None
+    if max_retries is not None:
+        try:
+            openai_max_retries = int(max_retries)
+        except (TypeError, ValueError):
+            openai_max_retries = None
+
+    agno_retries = 0
+    if retries is not None:
+        try:
+            agno_retries = max(int(retries), 0)
+        except (TypeError, ValueError):
+            agno_retries = 0
+
+    agno_retry_delay = 1
+    if delay_between_retries is not None:
+        try:
+            agno_retry_delay = max(int(delay_between_retries), 0)
+        except (TypeError, ValueError):
+            agno_retry_delay = 1
 
     model = OpenAILike(
         id=model_id,
         api_key=api_key,
         base_url=base_url,
+        timeout=openai_timeout,
+        max_retries=openai_max_retries,
+        retries=agno_retries,
+        delay_between_retries=agno_retry_delay,
+        exponential_backoff=bool(exponential_backoff) if exponential_backoff is not None else False,
     )
     if structured_outputs in {False, "false", "off", "disabled"}:
         model.supports_native_structured_outputs = False
@@ -534,6 +575,21 @@ def build_agents(config: Config) -> AgentRegistry:
     add_datetime = bool(config.get("context", "add_datetime", default=True))
     timezone_identifier = config.get("context", "timezone_identifier", default=None)
 
+    cognee_cfg = load_cognee_config(config)
+    if cognee_cfg.enabled:
+        cognee_tools = CogneeTools(client=CogneeClient(cognee_cfg))
+        tools["cognee"] = permission_manager.wrap_tool(
+            tool=cognee_tools,
+            tool_name="cognee",
+            agent_name_getter=lambda: get_tool_runtime_context().agent_name or "unknown",
+        )
+        logger.info(
+            "Cognee toolkit enabled base_url=%s dataset=%s user=%s",
+            cognee_cfg.base_url,
+            cognee_cfg.dataset,
+            cognee_cfg.user or "none",
+        )
+
     knowledge, learnings_knowledge = _build_knowledge(config)
     discovery_tools: DiscoveryTools | None = None
     if learnings_knowledge is not None:
@@ -589,19 +645,42 @@ def build_agents(config: Config) -> AgentRegistry:
         if skills_enabled:
             base_dirs = [config.resolve_path(p) for p in skills_cfg.get("directories", [])]
             skill_names = list(agent_def.get("skills", []) or [])
-            loaders: list[SkillLoader] = []
+            loader_items: list[tuple[str, SkillLoader]] = []
             if skill_names:
                 for base_dir in base_dirs:
                     for skill_name in skill_names:
                         candidate = base_dir / skill_name
                         if candidate.exists():
-                            loaders.append(LocalSkills(str(candidate)))
+                            loader_items.append((str(candidate), LocalSkills(str(candidate))))
             else:
                 for base_dir in base_dirs:
                     if base_dir.exists():
-                        loaders.append(LocalSkills(str(base_dir)))
-            if loaders:
-                skills_loader = Skills(loaders=loaders)
+                        loader_items.append((str(base_dir), LocalSkills(str(base_dir))))
+            if loader_items:
+                loaders = [item[1] for item in loader_items]
+                try:
+                    skills_loader = Skills(loaders=loaders)
+                except SkillValidationError as exc:
+                    logger.warning(
+                        "Agent '%s' skill validation failed (%s). Retrying with invalid skill sources skipped.",
+                        name,
+                        exc,
+                    )
+                    valid_loaders: list[SkillLoader] = []
+                    for source_path, loader in loader_items:
+                        try:
+                            Skills(loaders=[loader])
+                        except SkillValidationError as loader_exc:
+                            logger.warning(
+                                "Skipping invalid skill source for agent '%s': %s (%s)",
+                                name,
+                                source_path,
+                                loader_exc,
+                            )
+                            continue
+                        valid_loaders.append(loader)
+                    if valid_loaders:
+                        skills_loader = Skills(loaders=valid_loaders)
 
         agent_memory_cfg: dict[str, Any] = _coerce_mapping(agent_def.get("memory"))
         mem_options = _build_memory_options(config, model, agent_memory_cfg)
