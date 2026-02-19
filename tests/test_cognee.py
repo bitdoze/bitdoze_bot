@@ -117,6 +117,60 @@ def test_cognee_search_skips_empty_success_and_finds_non_empty(monkeypatch) -> N
     assert results == ["remember this"]
 
 
+def test_cognee_search_prefers_chunks_search_type(monkeypatch) -> None:
+    config = Config(
+        data={
+            "memory": {
+                "cognee": {
+                    "enabled": True,
+                    "base_url": "http://localhost:8000",
+                    "search_paths": ["/api/v1/search"],
+                }
+            }
+        },
+        path=Path("config.yaml"),
+    )
+    client = CogneeClient(load_cognee_config(config))
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_request(self, method, url, timeout, headers, **kwargs):  # noqa: ANN001
+        payload = kwargs.get("json") or {}
+        if isinstance(payload, dict):
+            captured_payloads.append(payload)
+        if payload.get("searchType") == "CHUNKS":
+            return _DummyResponse(200, payload={"results": [{"text": "chunk hit"}]})
+        return _DummyResponse(200, payload={"results": []})
+
+    monkeypatch.setattr(client, "ensure_dataset", lambda: True)
+    monkeypatch.setattr("requests.Session.request", fake_request)
+    results = client.search("remember", limit=3)
+    assert results == ["chunk hit"]
+    assert captured_payloads
+    assert captured_payloads[0].get("searchType") == "CHUNKS"
+
+
+def test_cognee_search_extracts_from_verbose_context_result(monkeypatch) -> None:
+    config = Config(
+        data={"memory": {"cognee": {"enabled": True, "base_url": "http://localhost:8000"}}},
+        path=Path("config.yaml"),
+    )
+    client = CogneeClient(load_cognee_config(config))
+
+    def fake_request(self, method, url, timeout, headers, **kwargs):  # noqa: ANN001
+        payload = [
+            {
+                "text_result": [{"text": "CANARY_FROM_VERBOSE"}],
+                "context_result": "CANARY_FROM_VERBOSE extra",
+            }
+        ]
+        return _DummyResponse(200, payload=payload)
+
+    monkeypatch.setattr(client, "ensure_dataset", lambda: True)
+    monkeypatch.setattr("requests.Session.request", fake_request)
+    results = client.search("canary", limit=3)
+    assert any("CANARY_FROM_VERBOSE" in item for item in results)
+
+
 def test_cognee_search_ensures_dataset_before_query(monkeypatch) -> None:
     config = Config(
         data={"memory": {"cognee": {"enabled": True, "base_url": "http://localhost:8000"}}},

@@ -333,6 +333,20 @@ class CogneeClient:
         self.ensure_dataset()
         limit = max(int(limit), 1)
         payloads = [
+            {
+                "searchType": "CHUNKS",
+                "query": query,
+                "datasets": [self._cfg.dataset],
+                "topK": limit,
+                "onlyContext": False,
+            },
+            {
+                "searchType": "CHUNKS_LEXICAL",
+                "query": query,
+                "datasets": [self._cfg.dataset],
+                "topK": limit,
+                "onlyContext": False,
+            },
             {"query": query, "datasets": [self._cfg.dataset], "topK": limit, "onlyContext": True},
             {"dataset": self._cfg.dataset, "user": self._cfg.user, "query": query, "limit": limit},
             {"dataset": self._cfg.dataset, "query": query, "top_k": limit},
