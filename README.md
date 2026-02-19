@@ -20,7 +20,7 @@ A Discord-first AI agent powered by [Agno](https://github.com/agno-agi/agno), wi
 - **Soul + Heartbeat** — persona via `workspace/SOUL.md`, proactive heartbeat via `workspace/HEARTBEAT.md`
 
 ### Infrastructure
-- **Docker support** — optional PostgreSQL + PgVector via `docker-compose.yml`
+- **Docker support** — optional PostgreSQL + PgVector and Cognee via `docker-compose.yml`
 - **Structured logging** — config-driven stdout + optional rotating file logs
 - **Tool permissions** — runtime allow/deny rules with JSONL audit logging
 - **Extensible** — add agents via config or folder-based workspace agents
@@ -58,15 +58,17 @@ Wizard prompts:
 - **Optional**: PostgreSQL + PgVector setup via Docker (for knowledge base)
 - **Optional**: Knowledge backend selection (LanceDb or PgVector)
 
-### 3. (Optional) Start PgVector
+### 3. (Optional) Start PgVector + Cognee
 
-If you chose PgVector during setup, or want to start it manually:
+If you chose PgVector/Cognee during setup, or want to start them manually:
 
 ```bash
 docker compose up -d
 ```
 
-This starts PostgreSQL 17 with pgvector on port 5532, storing data at `~/.bitdoze-bot/data/pgdata`.
+This starts:
+- PostgreSQL 17 with pgvector on port `5532`, storing data at `~/.bitdoze-bot/data/pgdata`
+- Cognee API on `127.0.0.1:8000` (host-loopback only), storing data at `~/.bitdoze-bot/data/cognee`
 
 ### 4. (Optional) Setup knowledge base
 
@@ -177,6 +179,7 @@ memory:
     auto_sync_conversations: true
     auto_recall_enabled: true
     auto_recall_limit: 5
+    auto_recall_timeout_seconds: 3
     auto_recall_max_chars: 2000
     auto_recall_inject_all: false
     timeout_seconds: 8
@@ -213,6 +216,7 @@ Expected: JSON response (list/object), not connection refused.
 
 5. If recall is weak:
    - Increase `memory.cognee.auto_recall_limit` (for example `7` to `10`).
+   - Increase `memory.cognee.auto_recall_timeout_seconds` if Cognee search is timing out.
    - Increase `memory.cognee.auto_recall_max_chars` (for example `2500` to `4000`).
    - Set `memory.cognee.auto_recall_inject_all: true` to inject full matched items (no per-item truncation and no total char cap).
    - Ensure your question includes clear keywords from the earlier memory.
@@ -459,25 +463,26 @@ agents:
 
 Skill names must be lowercase and use hyphens, and must match the folder name.
 
-## Docker (PgVector)
+## Docker (PgVector + Cognee)
 
-The project includes a `docker-compose.yml` for PostgreSQL 17 with pgvector. This is **optional** — LanceDb works without any external services.
+The project includes a `docker-compose.yml` for PostgreSQL 17 with pgvector and a Cognee API service. This is **optional** — LanceDb works without any external services.
 
 ```bash
-# Start PgVector
+# Start services
 docker compose up -d
 
 # Check status
 docker compose ps
 
-# View logs
+# View logs (examples)
 docker compose logs -f pgvector
+docker compose logs -f cognee
 
 # Stop
 docker compose down
 ```
 
-Configuration:
+PgVector configuration:
 | Setting | Default | Env Var |
 |---------|---------|---------|
 | Port | 5532 | `PGVECTOR_PORT` |
@@ -488,6 +493,15 @@ Configuration:
 | Connection URL | `postgresql+psycopg://bitdoze:bitdoze_secret@localhost:5532/bitdoze` | `PGVECTOR_DB_URL` |
 
 Port 5532 is used to avoid conflicts with any system PostgreSQL on 5432.
+
+Cognee configuration:
+| Setting | Default | Env Var |
+|---------|---------|---------|
+| Host bind | `127.0.0.1:8000` | — |
+| Require auth | `false` | — |
+| Backend access control | `false` | — |
+| LLM key passthrough | empty | `LLM_API_KEY` |
+| Data dir | `~/.bitdoze-bot/data/cognee` | `BITDOZE_BOT_HOME` |
 
 ## Scripts
 
@@ -551,7 +565,7 @@ Current coverage includes:
 bitdoze-bot/
 ├── main.py                    # Entry point
 ├── config.example.yaml        # Reference configuration
-├── docker-compose.yml         # PgVector (optional)
+├── docker-compose.yml         # PgVector + Cognee (optional)
 ├── pyproject.toml             # Dependencies (managed with uv)
 ├── bitdoze_bot/
 │   ├── agents.py              # Agent/team construction + knowledge base

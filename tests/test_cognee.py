@@ -31,6 +31,7 @@ def test_load_cognee_config_from_memory_section(monkeypatch) -> None:
                     "auto_sync_conversations": True,
                     "auto_recall_enabled": True,
                     "auto_recall_limit": 4,
+                    "auto_recall_timeout_seconds": 2,
                     "auto_recall_max_chars": 1500,
                     "auto_recall_inject_all": True,
                     "timeout_seconds": 9,
@@ -49,6 +50,7 @@ def test_load_cognee_config_from_memory_section(monkeypatch) -> None:
     assert cfg.timeout_seconds == 9
     assert cfg.auto_recall_enabled is True
     assert cfg.auto_recall_limit == 4
+    assert cfg.auto_recall_timeout_seconds == 2
     assert cfg.auto_recall_max_chars == 1500
     assert cfg.auto_recall_inject_all is True
 
@@ -113,6 +115,28 @@ def test_cognee_search_skips_empty_success_and_finds_non_empty(monkeypatch) -> N
     monkeypatch.setattr("requests.Session.request", fake_request)
     results = client.search("remember", limit=3)
     assert results == ["remember this"]
+
+
+def test_cognee_search_ensures_dataset_before_query(monkeypatch) -> None:
+    config = Config(
+        data={"memory": {"cognee": {"enabled": True, "base_url": "http://localhost:8000"}}},
+        path=Path("config.yaml"),
+    )
+    client = CogneeClient(load_cognee_config(config))
+    called = {"ensure": 0}
+
+    def fake_ensure_dataset() -> bool:
+        called["ensure"] += 1
+        return True
+
+    def fake_request(self, method, url, timeout, headers, **kwargs):  # noqa: ANN001
+        return _DummyResponse(200, payload={"results": [{"text": "match"}]})
+
+    monkeypatch.setattr(client, "ensure_dataset", fake_ensure_dataset)
+    monkeypatch.setattr("requests.Session.request", fake_request)
+    results = client.search("query", limit=1)
+    assert called["ensure"] == 1
+    assert results == ["match"]
 
 
 def test_cognee_save_conversation_turn_chunks_large_payload(monkeypatch) -> None:

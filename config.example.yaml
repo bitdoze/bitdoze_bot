@@ -89,6 +89,7 @@ memory:
         auto_sync_conversations: true
         auto_recall_enabled: true
         auto_recall_limit: 5
+        auto_recall_timeout_seconds: 3
         auto_recall_max_chars: 2000
         auto_recall_inject_all: false
         timeout_seconds: 8

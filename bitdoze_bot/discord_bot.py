@@ -784,9 +784,12 @@ class DiscordAgentBot(commands.Bot):
                 client.search,
                 search_query,
                 self._cognee_cfg.auto_recall_limit,
-                max_payloads=3,
-                max_paths=3,
-                timeout_seconds=min(self._cognee_cfg.timeout_seconds, 5),
+                max_payloads=1,
+                max_paths=1,
+                timeout_seconds=min(
+                    self._cognee_cfg.timeout_seconds,
+                    self._cognee_cfg.auto_recall_timeout_seconds,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             self._cognee_recall_failures += 1
@@ -864,6 +867,18 @@ class DiscordAgentBot(commands.Bot):
             logger.info("Logged in as %s (id: %s)", user, user.id)
         else:
             logger.info("Logged in (user not available yet)")
+        if self._cognee_client is not None and self._cognee_cfg.enabled:
+            client = self._cognee_client
+
+            async def _ensure_dataset() -> None:
+                try:
+                    await asyncio.to_thread(client.ensure_dataset)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Cognee startup ensure_dataset failed: %s", exc)
+
+            task = asyncio.create_task(_ensure_dataset())
+            self._background_tasks.add(task)
+            task.add_done_callback(lambda t: self._background_tasks.discard(t))
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:

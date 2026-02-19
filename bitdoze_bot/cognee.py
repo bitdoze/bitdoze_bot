@@ -28,6 +28,7 @@ class CogneeConfig:
     auto_sync_conversations: bool = True
     auto_recall_enabled: bool = True
     auto_recall_limit: int = 5
+    auto_recall_timeout_seconds: int = 3
     auto_recall_max_chars: int = 2000
     auto_recall_inject_all: bool = False
     max_turn_chars: int = 6000
@@ -83,6 +84,10 @@ def load_cognee_config(config: Config) -> CogneeConfig:
         auto_sync_conversations=parse_bool(merged.get("auto_sync_conversations", True), True),
         auto_recall_enabled=parse_bool(merged.get("auto_recall_enabled", True), True),
         auto_recall_limit=max(_safe_positive_int(merged.get("auto_recall_limit", 5), 5), 1),
+        auto_recall_timeout_seconds=max(
+            _safe_positive_int(merged.get("auto_recall_timeout_seconds", 3), 3),
+            1,
+        ),
         auto_recall_max_chars=max(
             _safe_positive_int(merged.get("auto_recall_max_chars", 2000), 2000),
             256,
@@ -324,6 +329,8 @@ class CogneeClient:
         started_at = perf_counter()
         if not query.strip():
             return []
+        # Ensure dataset exists for first-recall scenarios (before any write occurred).
+        self.ensure_dataset()
         limit = max(int(limit), 1)
         payloads = [
             {"query": query, "datasets": [self._cfg.dataset], "topK": limit, "onlyContext": True},
@@ -333,18 +340,25 @@ class CogneeClient:
         ]
         payload_candidates = payloads[: max_payloads] if max_payloads is not None else payloads
         path_candidates = self._cfg.search_paths[: max_paths] if max_paths is not None else self._cfg.search_paths
+        detail = "no endpoint responded successfully"
+        had_success_response = False
         for payload in payload_candidates:
             for path in path_candidates:
                 try:
                     response = self._request("POST", path, json=payload, timeout_seconds=timeout_seconds)
-                except requests.RequestException:
+                except requests.RequestException as exc:
+                    detail = str(exc)
                     continue
                 if response.status_code in {404, 405}:
+                    detail = f"{path}: HTTP {response.status_code}"
                     continue
                 if not (200 <= response.status_code < 300):
+                    detail = f"{path}: HTTP {response.status_code} {response.text[:200]}"
                     continue
+                had_success_response = True
                 results = _extract_text_results(_json_or_empty(response))
                 if not results:
+                    detail = f"{path}: HTTP {response.status_code} empty results"
                     continue
                 elapsed_ms = int((perf_counter() - started_at) * 1000)
                 logger.info(
@@ -367,12 +381,22 @@ class CogneeClient:
                         break
                 return deduped
         elapsed_ms = int((perf_counter() - started_at) * 1000)
+        if had_success_response:
+            logger.info(
+                "Cognee search no_matches dataset=%s query=%s limit=%d elapsed_ms=%d",
+                self._cfg.dataset,
+                query[:80],
+                limit,
+                elapsed_ms,
+            )
+            return []
         logger.warning(
-            "Cognee search failed dataset=%s query=%s limit=%d elapsed_ms=%d",
+            "Cognee search failed dataset=%s query=%s limit=%d elapsed_ms=%d reason=%s",
             self._cfg.dataset,
             query[:80],
             limit,
             elapsed_ms,
+            detail,
         )
         return []
 
