@@ -13,6 +13,7 @@ from bitdoze_bot.config import Config
 from bitdoze_bot.discord_bot import (
     _AccessControlSettings,
     _build_user_context_from_settings,
+    _clean_cognee_result_item,
     _ContextSettings,
     _collect_delegation_paths,
     _build_response_input,
@@ -70,6 +71,26 @@ def test_parse_agent_hint() -> None:
     agent_hint, content = _parse_agent_hint("agent:architect plan the migration")
     assert agent_hint == "architect"
     assert content == "plan the migration"
+
+
+def test_clean_cognee_result_item_prefers_body_content() -> None:
+    item = (
+        "timestamp: 2026-02-20T16:00:09Z\n"
+        "user_id: discord:123\n"
+        "session_id: discord:abc\n"
+        "agent: main\n\n"
+        "USER (summary):\nI have 4 cats.\n\n"
+        "ASSISTANT (summary):\nNoted.\n"
+    )
+    cleaned = _clean_cognee_result_item(item)
+    assert "I have 4 cats" in cleaned
+    assert "timestamp:" not in cleaned
+    assert "session_id:" not in cleaned
+
+
+def test_clean_cognee_result_item_handles_plain_text() -> None:
+    cleaned = _clean_cognee_result_item("I prefer cats over dogs.")
+    assert cleaned == "I prefer cats over dogs."
 
 
 def test_select_agent_name_from_rules() -> None:

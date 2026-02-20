@@ -161,11 +161,14 @@ agents:
 Combined with `learned_knowledge: agentic` in learning config, the agent decides when to save and recall learnings automatically.
 
 ### Memory
-- `memory`: `mode: automatic` (best capture), SQLite db path, history + summaries (custom prompt supported)
+- `memory`: `mode: automatic` (best capture), backend selection (`sqlite` or `postgres`), history + summaries (custom prompt supported)
+- SQLite settings: `backend: sqlite` + `db_file`
+- Postgres settings: `backend: postgres` + `db_url` (or `MEMORY_DB_URL`, fallback `PGVECTOR_DB_URL`)
 - `memory.summary_prompt`: customizable session summary with support for `decisions` and `unresolved` keys
 - `memory.cognee`: optional external long-term memory (Cognee API)
 - `memory.cognee.auto_sync_conversations`: when true, each successful Discord user/assistant turn is stored in Cognee as a compact summary plus chunked user/assistant entries (better semantic recall on long turns)
 - `memory.cognee.auto_recall_enabled`: when true, each incoming message performs Cognee recall and injects top matches into system context
+- `memory.cognee.auto_cognify_after_write`: when true, the bot triggers Cognee `cognify` after successful writes (throttled) so new facts become searchable
 - Cognee ingestion includes metadata (user/session/agent/channel/guild/timestamps), plus duplicate suppression for recently repeated content
 - Cognee retrieval tries multiple compatible payload/path shapes and skips empty 2xx responses to reduce false misses
 
@@ -184,6 +187,8 @@ memory:
     auto_recall_timeout_seconds: 3
     auto_recall_max_chars: 2000
     auto_recall_inject_all: false
+    auto_cognify_after_write: true
+    cognify_cooldown_seconds: 60
     timeout_seconds: 8
     max_turn_chars: 6000
     auth_token_env: COGNEE_API_TOKEN
@@ -435,7 +440,7 @@ Message handling:
 - If target is a team, Agno handles delegation and synthesis natively.
 
 Memory and learning:
-- Shared DB: `memory.db_file` (SQLite).
+- Shared DB: `memory.backend=sqlite` + `memory.db_file` or `memory.backend=postgres` + `memory.db_url`.
 - Member learning: configured via `learning` (LearningMachine stores like `user_profile`, `user_memory`).
 - Team memory/history: configured in `teams.definitions[]` via options such as:
   - `add_team_history_to_members`

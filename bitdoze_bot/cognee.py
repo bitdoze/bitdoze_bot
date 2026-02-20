@@ -32,6 +32,8 @@ class CogneeConfig:
     auto_recall_max_chars: int = 2000
     auto_recall_inject_all: bool = False
     max_turn_chars: int = 6000
+    auto_cognify_after_write: bool = True
+    cognify_cooldown_seconds: int = 60
     auth_token_env: str = "COGNEE_API_TOKEN"
     auth_token: str = ""
     upsert_paths: tuple[str, ...] = (
@@ -94,6 +96,11 @@ def load_cognee_config(config: Config) -> CogneeConfig:
         ),
         auto_recall_inject_all=parse_bool(merged.get("auto_recall_inject_all", False), False),
         max_turn_chars=max(_safe_positive_int(merged.get("max_turn_chars", 6000), 6000), 512),
+        auto_cognify_after_write=parse_bool(merged.get("auto_cognify_after_write", True), True),
+        cognify_cooldown_seconds=max(
+            _safe_positive_int(merged.get("cognify_cooldown_seconds", 60), 60),
+            5,
+        ),
         auth_token_env=auth_token_env,
         auth_token=auth_token,
         upsert_paths=_coerce_paths(merged.get("upsert_paths"), CogneeConfig.upsert_paths),
@@ -113,6 +120,7 @@ class CogneeClient:
         self._recent_content_hashes: dict[str, float] = {}
         self._dedup_ttl_seconds = 6 * 60 * 60
         self._dedup_max_items = 2048
+        self._last_cognify_at = 0.0
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -266,6 +274,7 @@ class CogneeClient:
                     elapsed_ms,
                 )
                 self._remember_hash(content_hash)
+                self._maybe_trigger_cognify()
                 return True
             detail = f"/api/v1/add: HTTP {response.status_code} {response.text[:200]}"
         except requests.RequestException as exc:
@@ -303,6 +312,7 @@ class CogneeClient:
                         elapsed_ms,
                     )
                     self._remember_hash(content_hash)
+                    self._maybe_trigger_cognify()
                     return True
             if attempt == 1:
                 # Short pause before retry to ride out transient disconnects.
@@ -316,6 +326,29 @@ class CogneeClient:
             detail,
         )
         return False
+
+    def _maybe_trigger_cognify(self) -> None:
+        if not self._cfg.auto_cognify_after_write:
+            return
+        now = perf_counter()
+        if now - self._last_cognify_at < float(self._cfg.cognify_cooldown_seconds):
+            return
+        payload = {"datasets": [self._cfg.dataset], "runInBackground": True}
+        try:
+            response = self._request("POST", "/api/v1/cognify", json=payload, timeout_seconds=self._cfg.timeout_seconds)
+        except requests.RequestException as exc:
+            logger.warning("Cognee auto-cognify request failed dataset=%s reason=%s", self._cfg.dataset, exc)
+            return
+        if 200 <= response.status_code < 300:
+            self._last_cognify_at = now
+            logger.info("Cognee auto-cognify triggered dataset=%s", self._cfg.dataset)
+            return
+        logger.warning(
+            "Cognee auto-cognify failed dataset=%s status=%d body=%s",
+            self._cfg.dataset,
+            response.status_code,
+            response.text[:200],
+        )
 
     def search(
         self,

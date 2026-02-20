@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from agno.tools.hackernews import HackerNewsTools
 
+from bitdoze_bot import agents as agents_module
 from bitdoze_bot.agents import build_agents
 from bitdoze_bot.config import load_config
 
@@ -312,3 +314,55 @@ agents:
     main_agent = registry.get("main")
     tools = getattr(main_agent, "tools", None) or []
     assert tools == []
+
+
+def test_memory_backend_postgres_uses_memory_db_url_env(monkeypatch, tmp_path: Path) -> None:
+    class DummyPostgresDb:
+        def __init__(self, **kwargs: str) -> None:
+            self.kwargs = kwargs
+
+    import agno.db.postgres as postgres_mod
+
+    monkeypatch.setattr(postgres_mod, "PostgresDb", DummyPostgresDb)
+    monkeypatch.setenv("MEMORY_DB_URL", "postgresql+psycopg://u:p@localhost:5532/bitdoze")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+memory:
+  backend: postgres
+  db_url: null
+  db_schema: bot
+  session_table: session_entries
+  memory_table: memory_entries
+""".strip(),
+        encoding="utf-8",
+    )
+
+    db = agents_module._build_memory_db(load_config(config_path))
+
+    assert isinstance(db, DummyPostgresDb)
+    assert db.kwargs == {
+        "db_url": "postgresql+psycopg://u:p@localhost:5532/bitdoze",
+        "db_schema": "bot",
+        "session_table": "session_entries",
+        "memory_table": "memory_entries",
+    }
+
+
+def test_memory_backend_postgres_requires_db_url(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("MEMORY_DB_URL", raising=False)
+    monkeypatch.delenv("PGVECTOR_DB_URL", raising=False)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+memory:
+  backend: postgres
+  db_url: null
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="memory.db_url is required"):
+        agents_module._build_memory_db(load_config(config_path))

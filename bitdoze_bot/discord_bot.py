@@ -308,6 +308,32 @@ def _parse_agent_hint(content: str) -> tuple[str | None, str]:
     return None, content
 
 
+def _clean_cognee_result_item(item: str) -> str:
+    raw = item.strip()
+    if not raw:
+        return ""
+
+    # Stored Cognee memories include metadata headers followed by a blank line.
+    # Prefer the body so injected context contains user facts, not IDs/timestamps.
+    sections = raw.split("\n\n")
+    if len(sections) >= 2:
+        header = sections[0].lower()
+        if "timestamp:" in header and ("user_id:" in header or "session_id:" in header):
+            candidate = "\n\n".join(sections[1:]).strip()
+            if candidate:
+                raw = candidate
+
+    cleaned = " ".join(raw.split())
+    for marker in (
+        "USER (summary):",
+        "ASSISTANT (summary):",
+        "role: user",
+        "role: assistant",
+    ):
+        cleaned = cleaned.replace(marker, "").strip()
+    return cleaned
+
+
 _run_semaphore: asyncio.Semaphore | None = None
 _run_semaphore_size: int | None = None
 
@@ -865,7 +891,7 @@ class DiscordAgentBot(commands.Bot):
                 client.search,
                 search_query,
                 self._cognee_cfg.auto_recall_limit,
-                max_payloads=1,
+                max_payloads=2,
                 max_paths=1,
                 timeout_seconds=min(
                     self._cognee_cfg.timeout_seconds,
@@ -887,7 +913,7 @@ class DiscordAgentBot(commands.Bot):
         max_chars = self._cognee_cfg.auto_recall_max_chars
         inject_all = self._cognee_cfg.auto_recall_inject_all
         for item in results:
-            cleaned = " ".join(item.split())
+            cleaned = _clean_cognee_result_item(item)
             if not cleaned:
                 continue
             snippet = cleaned if inject_all else cleaned[:420]

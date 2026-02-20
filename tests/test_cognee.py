@@ -242,3 +242,39 @@ def test_cognee_add_memory_deduplicates_recent_identical_content(monkeypatch) ->
     first_count = calls["count"]
     assert client.add_memory("duplicate text", metadata={"type": "test"}) is True
     assert calls["count"] == first_count
+
+
+def test_cognee_add_memory_triggers_cognify_with_cooldown(monkeypatch) -> None:
+    config = Config(
+        data={
+            "memory": {
+                "cognee": {
+                    "enabled": True,
+                    "dataset_paths": ["/dataset-ok"],
+                    "auto_cognify_after_write": True,
+                    "cognify_cooldown_seconds": 3600,
+                }
+            }
+        },
+        path=Path("config.yaml"),
+    )
+    client = CogneeClient(load_cognee_config(config))
+    called_urls: list[str] = []
+
+    def fake_request(self, method, url, timeout, headers, **kwargs):  # noqa: ANN001
+        called_urls.append(url)
+        if url.endswith("/dataset-ok"):
+            return _DummyResponse(200, payload={"ok": True})
+        if url.endswith("/api/v1/add"):
+            return _DummyResponse(200, payload={"status": "ok"})
+        if url.endswith("/api/v1/cognify"):
+            return _DummyResponse(200, payload={"status": "ok"})
+        return _DummyResponse(500, text="unexpected")
+
+    monkeypatch.setattr("requests.Session.request", fake_request)
+
+    assert client.add_memory("first text", metadata={"type": "test"}) is True
+    assert client.add_memory("second text", metadata={"type": "test"}) is True
+
+    cognify_calls = [url for url in called_urls if url.endswith("/api/v1/cognify")]
+    assert len(cognify_calls) == 1

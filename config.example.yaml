@@ -68,8 +68,10 @@ tool_permissions:
         redacted_keys: [token, secret, password, api_key, authorization]
 
 memory:
+    backend: sqlite # sqlite or postgres
     mode: automatic
     db_file: data/bitdoze.db
+    db_url: null # for postgres backend; or set MEMORY_DB_URL (fallback: PGVECTOR_DB_URL)
     add_history_to_context: true
     num_history_runs: 5
     read_chat_history: true
@@ -98,6 +100,8 @@ memory:
         auto_recall_timeout_seconds: 3
         auto_recall_max_chars: 2000
         auto_recall_inject_all: false
+        auto_cognify_after_write: true
+        cognify_cooldown_seconds: 60
         timeout_seconds: 8
         max_turn_chars: 6000
         auth_token_env: COGNEE_API_TOKEN

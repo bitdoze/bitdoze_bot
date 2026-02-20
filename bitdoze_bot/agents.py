@@ -7,6 +7,7 @@ from typing import Any, Literal, cast
 
 import yaml
 from agno.agent import Agent
+from agno.db import BaseDb
 from agno.db.sqlite import SqliteDb
 from agno.learn import (
     DecisionLogConfig,
@@ -267,7 +268,7 @@ def _build_learning_store(
     )
 
 
-def _build_learning(config: Config, db: SqliteDb, model: OpenAILike, cfg: dict[str, Any]) -> tuple[Any, bool]:
+def _build_learning(config: Config, db: BaseDb, model: OpenAILike, cfg: dict[str, Any]) -> tuple[Any, bool]:
     learning_cfg = dict(config.get("learning", default={}) or {})
     cfg_learning = cfg.get("learning", {})
     if isinstance(cfg_learning, dict):
@@ -309,6 +310,47 @@ def _build_learning(config: Config, db: SqliteDb, model: OpenAILike, cfg: dict[s
     )
     add_learnings_to_context = bool(learning_cfg.get("add_to_context", True))
     return learning, add_learnings_to_context
+
+
+def _build_memory_db(config: Config) -> BaseDb:
+    memory_cfg = config.get("memory", default={}) or {}
+    backend = str(memory_cfg.get("backend", "sqlite")).strip().lower()
+
+    if backend in {"sqlite", "sqlite3"}:
+        db_file = memory_cfg.get("db_file", "data/bitdoze.db")
+        db_path = config.resolve_path(db_file, default="data/bitdoze.db")
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        return SqliteDb(db_file=str(db_path))
+
+    if backend in {"postgres", "postgresql"}:
+        try:
+            from agno.db.postgres import PostgresDb
+        except ImportError as exc:
+            raise ValueError(
+                "Postgres memory backend requires agno postgres dependencies."
+            ) from exc
+
+        db_url = str(
+            memory_cfg.get("db_url")
+            or os.getenv("MEMORY_DB_URL", "")
+            or os.getenv("PGVECTOR_DB_URL", "")
+        ).strip()
+        if not db_url:
+            raise ValueError(
+                "memory.db_url is required for memory.backend=postgres "
+                "(or set MEMORY_DB_URL / PGVECTOR_DB_URL)."
+            )
+
+        return PostgresDb(
+            db_url=db_url,
+            db_schema=memory_cfg.get("db_schema"),
+            session_table=memory_cfg.get("session_table"),
+            memory_table=memory_cfg.get("memory_table"),
+        )
+
+    raise ValueError(
+        f"Unsupported memory backend: {backend}. Supported: sqlite, postgres."
+    )
 
 
 def _resolve_instructions(
@@ -566,11 +608,7 @@ def build_agents(config: Config) -> AgentRegistry:
             agent_name_getter=lambda: get_tool_runtime_context().agent_name or "unknown",
         )
 
-    memory_cfg = config.get("memory", default={})
-    db_file = memory_cfg.get("db_file", "data/bitdoze.db")
-    db_path = config.resolve_path(db_file, default="data/bitdoze.db")
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = SqliteDb(db_file=str(db_path))
+    db = _build_memory_db(config)
 
     add_datetime = bool(config.get("context", "add_datetime", default=True))
     timezone_identifier = config.get("context", "timezone_identifier", default=None)
