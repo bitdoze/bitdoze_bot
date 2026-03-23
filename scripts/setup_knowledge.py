@@ -51,12 +51,12 @@ def main() -> None:
 
     kb_cfg = config.get("knowledge", default={}) or {}
     backend = args.backend or kb_cfg.get("backend", "lancedb")
-    embedder_id = kb_cfg.get("embedder", "text-embedding-3-small")
 
     from agno.knowledge import Knowledge
-    from agno.knowledge.embedder.openai import OpenAIEmbedder
 
-    embedder = OpenAIEmbedder(id=embedder_id)
+    from bitdoze_bot.embedder import build_embedder
+
+    embedder = build_embedder(config)
 
     if backend == "pgvector":
         try:
