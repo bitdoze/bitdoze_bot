@@ -38,9 +38,18 @@ Keep answers practical and concise. Explain changes and validation when editing 
 
 ## File Tool Paths
 - The `file` toolkit base directory is already this `workspace/` folder.
-- Use relative paths like `USER.md`, `agents/architect/agent.yaml`, `memory/2026-02-11.md`.
+- Use relative paths like `USER.md`, `agents/general-subagent/agent.yaml`, `memory/2026-02-11.md`.
 - Do not prefix with `workspace/` in file tool calls.
 - Use `save_file(contents=..., file_name=...)` argument names exactly.
+
+## Delegation
+- Prefer delegating bounded, context-heavy, or parallelizable work instead of keeping the whole task in one run.
+- Use `general-subagent` for a single scoped task.
+- Use `general-subagents` or multiple general subagents when the work can be split into independent chunks.
+- Every delegation should include scope, relevant files, expected output, and constraints.
+- Keep delegated tasks narrow so responses stay short and avoid prompt growth.
+- When the task needs current facts, first delegate detail gathering and source collection, then do the final synthesis yourself.
+- For scheduled or cron-style runs, default to a two-step pattern: gather details with subagents, then produce the final delivered message.
 
 ## First-Use Onboarding
 On first direct interaction, check USER.md.
@@ -116,7 +125,43 @@ Return clear implementation plans that engineers can execute.
 Implement the plan with safe, tested changes.
 Keep diffs focused and explain validation steps.
 """,
+    "general-subagent": """You are a general subagent.
+Execute one bounded task delegated by another agent.
+Do not take ownership of the whole conversation or broaden the scope.
+Return the result, key findings, and blockers in a concise form that the parent agent can merge quickly.
+""",
+    "general-subagent-2": """You are a general subagent.
+Execute one bounded task delegated by another agent.
+Do not take ownership of the whole conversation or broaden the scope.
+Return the result, key findings, and blockers in a concise form that the parent agent can merge quickly.
+""",
+    "general-subagent-3": """You are a general subagent.
+Execute one bounded task delegated by another agent.
+Do not take ownership of the whole conversation or broaden the scope.
+Return the result, key findings, and blockers in a concise form that the parent agent can merge quickly.
+""",
 }
+
+GENERAL_SUBAGENT_TEMPLATE = """name: {name}
+enabled: true
+model:
+  id: {model_id}
+  base_url: {base_url}
+  api_key_env: {api_key_env}
+tools: [web_search, hackernews, website, github, youtube, file, shell, discoveries, cognee]
+skills: []
+memory:
+  mode: disabled
+  add_history_to_context: false
+  read_chat_history: false
+  search_session_history: false
+  num_history_sessions: 0
+  add_memories_to_context: false
+  enable_session_summaries: false
+  add_session_summary_to_context: false
+learning:
+  enabled: false
+"""
 
 
 @dataclass(frozen=True)
@@ -237,7 +282,18 @@ def _normalize_rel_paths(config: dict[str, Any]) -> None:
 def _remove_delivery_team_references(config: dict[str, Any]) -> None:
     teams = _get_nested(config, ("teams",), {})
     if isinstance(teams, dict):
-        teams["definitions"] = []
+        definitions = teams.get("definitions", [])
+        if isinstance(definitions, list):
+            teams["definitions"] = [
+                item
+                for item in definitions
+                if not (
+                    isinstance(item, dict)
+                    and str(item.get("name", "")).strip().lower() in {"delivery-team", "general-subagents"}
+                )
+            ]
+        else:
+            teams["definitions"] = []
         teams.pop("default", None)
 
     rules = _get_nested(config, ("agents", "routing", "rules"), [])
@@ -395,9 +451,10 @@ def _create_workspace_agents(
     normalized_base_url = base_url or "null"
     for name, instructions in AGENT_INSTRUCTIONS.items():
         agent_dir = agents_dir / name
+        agent_template = GENERAL_SUBAGENT_TEMPLATE if name.startswith("general-subagent") else AGENT_TEMPLATE
         _write_if_missing(
             agent_dir / "agent.yaml",
-            AGENT_TEMPLATE.format(
+            agent_template.format(
                 name=name,
                 model_id=resolved_model_id,
                 base_url=normalized_base_url,
@@ -619,7 +676,7 @@ def _interactive_answers(home_dir_override: str | None = None) -> SetupAnswers:
     timezone_identifier = _prompt_text("Timezone identifier", default_tz)
     create_workspace_files = _prompt_yes_no("Create workspace starter files", default=True)
     create_workspace_agents = _prompt_yes_no(
-        "Create starter workspace agents (architect + software-engineer)",
+        "Create starter workspace agents (architect + software-engineer + general-subagents)",
         default=True,
     )
     configure_service = _prompt_yes_no(

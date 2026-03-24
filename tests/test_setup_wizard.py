@@ -49,6 +49,9 @@ def test_run_setup_creates_config_env_workspace_and_agents(tmp_path: Path) -> No
     assert (home_dir / "workspace" / "SOUL.md").exists()
     assert (home_dir / "workspace" / "agents" / "architect" / "agent.yaml").exists()
     assert (home_dir / "workspace" / "agents" / "software-engineer" / "agent.yaml").exists()
+    assert (home_dir / "workspace" / "agents" / "general-subagent" / "agent.yaml").exists()
+    assert (home_dir / "workspace" / "agents" / "general-subagent-2" / "agent.yaml").exists()
+    assert (home_dir / "workspace" / "agents" / "general-subagent-3" / "agent.yaml").exists()
     assert (home_dir / "bitdoze-bot.service").exists()
     assert (home_dir / ".config" / "systemd" / "user" / "bitdoze-bot.service").exists()
 
@@ -76,6 +79,7 @@ def test_run_setup_creates_config_env_workspace_and_agents(tmp_path: Path) -> No
     assert "Workspace Map" in agents_md
     assert "First-Use Onboarding" in agents_md
     assert "Cron Awareness" in agents_md
+    assert "Delegation" in agents_md
     user_md = (home_dir / "workspace" / "USER.md").read_text(encoding="utf-8")
     assert "onboarding_status: pending" in user_md
 

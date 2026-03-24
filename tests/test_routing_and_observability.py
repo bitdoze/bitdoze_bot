@@ -135,6 +135,28 @@ def test_build_response_input_adds_file_hint_for_file_requests() -> None:
     assert len(result) == 3
     assert result[1].role == "system"
     assert "use the 'file' tool functions" in (result[1].content or "")
+    assert "do not use the shell tool" in (result[1].content or "").lower()
+
+
+def test_build_response_input_adds_file_hint_for_memory_requests() -> None:
+    result = _build_response_input("CTX", "Show me the project memory notes")
+    assert isinstance(result, list)
+    assert len(result) == 3
+    assert result[1].role == "system"
+    assert "use the 'file' tool functions" in (result[1].content or "")
+
+
+def test_build_response_input_avoids_system_role_for_minimax() -> None:
+    result = _build_response_input(
+        "CTX",
+        "Please edit config.yaml and read README.md",
+        model_base_url="https://api.minimax.chat/v1",
+    )
+    assert isinstance(result, list)
+    assert len(result) == 3
+    assert all(item.role == "user" for item in result)
+    assert (result[0].content or "").startswith("[System context]")
+    assert (result[1].content or "").startswith("[Tooling hint]")
 
 
 def test_extract_metrics_accepts_dict_usage_shape() -> None:
@@ -248,6 +270,24 @@ def test_load_runtime_config_accepts_session_strategy_values() -> None:
         Config(data={"runtime": {"session_id_strategy": "user"}}, path=Path("config.yaml"))
     )
     assert cfg.session_id_strategy == "user"
+
+
+def test_load_runtime_config_preserves_model_connection_fields() -> None:
+    cfg = load_runtime_config(
+        Config(
+            data={
+                "model": {
+                    "provider": "openai_like",
+                    "id": "MiniMax-Text-01",
+                    "base_url": "https://api.minimax.chat/v1",
+                }
+            },
+            path=Path("config.yaml"),
+        )
+    )
+    assert cfg.model_provider == "openai_like"
+    assert cfg.model_id == "MiniMax-Text-01"
+    assert cfg.model_base_url == "https://api.minimax.chat/v1"
 
 
 def test_build_session_id_uses_requested_strategy() -> None:

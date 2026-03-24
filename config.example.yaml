@@ -194,10 +194,17 @@ agents:
     base_instructions: |
         You may be orchestrated inside teams. Delegate planning-heavy tasks to architect and
         implementation-heavy tasks to software-engineer when appropriate.
+        Delegate bounded, context-heavy, or overflow work to general-subagent.
+        If the task splits cleanly, use the general-subagents team for parallel worker runs.
+        For research-heavy or scheduled runs, first delegate detail gathering to subagents,
+        then synthesize the final answer yourself from their findings.
     workspace_dir: workspace/agents
     aliases:
         engineer: software-engineer
         software-enginner: software-engineer
+        worker: general-subagent
+        subagent: general-subagent
+        workers: general-subagents
     default: main
     definitions:
         - name: main
@@ -256,6 +263,20 @@ agents:
 
 teams:
     definitions:
+        - name: general-subagents
+          members: [general-subagent, general-subagent-2, general-subagent-3]
+          tools: []
+          respond_directly: true
+          determine_input_for_members: true
+          delegate_to_all_members: true
+          add_member_tools_to_context: true
+          add_team_history_to_members: false
+          num_team_history_runs: 0
+          show_members_responses: false
+          instructions: |
+              You are a pool of general subagents.
+              Split work into independent chunks with minimal overlap.
+              Delegate only the needed slices and return one concise synthesis.
         - name: delivery-team
           members: [architect, software-engineer]
           respond_directly: true

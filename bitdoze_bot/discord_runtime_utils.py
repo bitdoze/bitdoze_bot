@@ -1,17 +1,38 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from agno.run.agent import Message
 from agno.team import Team
 
 
-def build_response_input(user_context: str | None, content: str) -> list[Message] | str:
+def _is_system_role_unsupported(
+    model_provider: str | None = None,
+    model_id: str | None = None,
+    model_base_url: str | None = None,
+) -> bool:
+    provider_text = str(model_provider or "").strip().lower()
+    model_text = str(model_id or "").strip().lower()
+    base_url_text = str(model_base_url or "").strip().lower()
+    return any("minimax" in value for value in (provider_text, model_text, base_url_text))
+
+
+def build_response_input(
+    user_context: str | None,
+    content: str,
+    *,
+    model_provider: str | None = None,
+    model_id: str | None = None,
+    model_base_url: str | None = None,
+) -> list[Message] | str:
     file_task_hint = (
-        "For local file/code operations, use the 'file' tool functions "
+        "For local file/code operations, use the 'file' tool functions first "
         "(list_files, search_files, read_file, read_file_chunk, save_file, replace_file_chunk) "
-        "instead of shell or github tools. File paths are relative to the workspace root, "
-        "so use 'USER.md' (not 'workspace/USER.md'). Use save_file(contents=..., file_name=...)."
+        "instead of shell or github tools. If the user asks to read a local file, return file contents, "
+        "inspect a config, or check memory notes, do not use the shell tool when the file tool can do it. "
+        "File paths are relative to the workspace root, so use 'USER.md' (not 'workspace/USER.md'). "
+        "Use save_file(contents=..., file_name=...)."
     )
     lower_content = content.lower()
     file_keywords = (
@@ -27,6 +48,11 @@ def build_response_input(user_context: str | None, content: str) -> list[Message
         "search in",
         "find in",
         "codebase",
+        "memory",
+        "memories",
+        "notes",
+        "docker-compose",
+        "compose file",
         ".py",
         ".js",
         ".ts",
@@ -35,17 +61,32 @@ def build_response_input(user_context: str | None, content: str) -> list[Message
         ".yml",
         ".json",
     )
-    needs_file_hint = any(token in lower_content for token in file_keywords)
+    path_like_pattern = re.compile(
+        r"(^|\s)(~/\S+|/\S+|\./\S+|\.\./\S+|\S+\.(py|js|ts|md|yaml|yml|json|toml|ini|cfg|txt))"
+    )
+    needs_file_hint = any(token in lower_content for token in file_keywords) or bool(
+        path_like_pattern.search(content)
+    )
+    system_role_unsupported = _is_system_role_unsupported(
+        model_provider=model_provider,
+        model_id=model_id,
+        model_base_url=model_base_url,
+    )
+
+    def _instruction(role_content: str, *, label: str) -> Message:
+        if system_role_unsupported:
+            return Message(role="user", content=f"[{label}]\n{role_content}")
+        return Message(role="system", content=role_content)
 
     if user_context:
-        messages: list[Message] = [Message(role="system", content=user_context)]
+        messages: list[Message] = [_instruction(user_context, label="System context")]
         if needs_file_hint:
-            messages.append(Message(role="system", content=file_task_hint))
+            messages.append(_instruction(file_task_hint, label="Tooling hint"))
         messages.append(Message(role="user", content=content))
         return messages
     if needs_file_hint:
         return [
-            Message(role="system", content=file_task_hint),
+            _instruction(file_task_hint, label="Tooling hint"),
             Message(role="user", content=content),
         ]
     return content

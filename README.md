@@ -47,7 +47,7 @@ The wizard creates `~/.bitdoze-bot/` (or `$BITDOZE_BOT_HOME`) with:
 - `config.yaml` — main configuration
 - `.env` — secrets (tokens, API keys)
 - `workspace/` — SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, CRON.yaml
-- `workspace/agents/` — folder-based agent definitions
+- `workspace/agents/` — folder-based agent definitions, including starter general subagents for delegation
 - `workspace/knowledge/` — documents for the knowledge base
 - `skills/`, `logs/`, `data/`
 - `bitdoze-bot.service` — systemd unit file
@@ -354,6 +354,7 @@ skills: []
 ```
 
 Folder agents are merged with config-defined agents by name. If names collide, folder definitions win.
+The starter setup includes `general-subagent`, `general-subagent-2`, and `general-subagent-3` as low-context workers, plus an example `general-subagents` team for parallel delegation.
 
 ## Teams
 Example:
@@ -454,6 +455,11 @@ Add a new teammate:
 3. Add `AGENTS.md` with role-specific instructions
 4. Add the agent name to `teams.definitions[].members` in `config.yaml`
 5. Restart the bot
+
+To reduce prompt pressure on the main agent, prefer a low-context worker pattern:
+1. Keep `main` as the coordinator
+2. Delegate bounded tasks to `general-subagent`
+3. Use a small worker team such as `general-subagents` when the task can be split into parallel chunks
 
 ## Skills Format (Agno)
 Skills follow Agno's skill structure (see Agno docs). Each skill lives in its own folder

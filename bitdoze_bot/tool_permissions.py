@@ -4,6 +4,7 @@ import contextlib
 import contextvars
 import functools
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from typing import Any, Callable
 
 from bitdoze_bot.config import Config
 from bitdoze_bot.utils import parse_bool
+
+logger = logging.getLogger(__name__)
 
 
 class ToolPermissionError(PermissionError):
@@ -308,6 +311,38 @@ class ToolAuditLogger:
         self._config = config
         self._lock = threading.Lock()
 
+    def _log_event(self, event: dict[str, Any]) -> None:
+        level = logging.INFO
+        if event["outcome"] in {"blocked", "failed"}:
+            level = logging.WARNING
+
+        parts = [
+            "Tool event",
+            f"outcome={event['outcome']}",
+            f"tool={event['tool']}",
+            f"function={event['function']}",
+            f"agent={event.get('agent') or 'unknown'}",
+            f"run_kind={event.get('run_kind') or 'unknown'}",
+            f"reason={event['reason']}",
+        ]
+        if event.get("user_id") is not None:
+            parts.append(f"user_id={event['user_id']}")
+        if event.get("session_id") is not None:
+            parts.append(f"session_id={event['session_id']}")
+        if event.get("channel_id") is not None:
+            parts.append(f"channel_id={event['channel_id']}")
+        if event.get("guild_id") is not None:
+            parts.append(f"guild_id={event['guild_id']}")
+        if event.get("discord_user_id") is not None:
+            parts.append(f"discord_user_id={event['discord_user_id']}")
+        if event.get("error"):
+            parts.append(f"error={event['error']}")
+        if self._config.include_arguments:
+            parts.append(f"args={event.get('args', [])!r}")
+            parts.append(f"kwargs={event.get('kwargs', {})!r}")
+
+        logger.log(level, " ".join(parts))
+
     def _sanitize(self, value: Any) -> Any:
         if isinstance(value, dict):
             sanitized: dict[str, Any] = {}
@@ -361,6 +396,8 @@ class ToolAuditLogger:
         if self._config.include_arguments:
             event["args"] = self._sanitize(list(args or ()))
             event["kwargs"] = self._sanitize(kwargs or {})
+
+        self._log_event(event)
 
         payload = json.dumps(event, ensure_ascii=True)
         with self._lock:

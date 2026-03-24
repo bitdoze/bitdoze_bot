@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -236,6 +237,39 @@ def test_audit_log_concurrent_writes_and_redaction(tmp_path: Path) -> None:
     assert all(item["tool"] == "shell" for item in entries)
     # include_arguments=true: token value must be redacted
     assert all(item.get("kwargs", {}).get("token") == "***REDACTED***" for item in entries)
+
+
+def test_tool_events_are_logged_to_standard_logger(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    log_path = tmp_path / "audit.jsonl"
+    config = Config(
+        data={
+            "tool_permissions": {
+                "enabled": True,
+                "default_effect": "allow",
+                "rules": [],
+                "audit": {"enabled": True, "path": str(log_path)},
+            }
+        },
+        path=Path("config.yaml"),
+    )
+    manager = ToolPermissionManager.from_config(config)
+    tool = manager.wrap_tool(DummyTool(), tool_name="file", agent_name_getter=lambda: "main")
+
+    with caplog.at_level(logging.INFO, logger="bitdoze_bot.tool_permissions"):
+        with tool_runtime_context(
+            run_kind="discord",
+            user_id="user-1",
+            session_id="session-1",
+            discord_user_id=1,
+            channel_id=2,
+            guild_id=3,
+            agent_name="main",
+        ):
+            tool.ping("ok")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Tool event outcome=allowed tool=file function=ping" in message for message in messages)
+    assert any("Tool event outcome=executed tool=file function=ping" in message for message in messages)
 
 
 def test_file_tool_argument_aliases_and_workspace_prefix_are_normalized(tmp_path: Path) -> None:

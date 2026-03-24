@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -30,26 +31,39 @@ def parse_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def strip_thinking_tags(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(
+        r"<\s*(think|thinking)\b[^>]*>.*?<\s*/\s*\1\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def extract_response_text(response: Any) -> str:
     if isinstance(response, str):
-        return response
+        return strip_thinking_tags(response)
 
     content = getattr(response, "content", None)
     if isinstance(content, str) and content.strip():
-        return content
+        return strip_thinking_tags(content)
 
     reasoning_content = getattr(response, "reasoning_content", None)
     if isinstance(reasoning_content, str) and reasoning_content.strip():
-        return reasoning_content
+        return strip_thinking_tags(reasoning_content)
 
     messages = getattr(response, "messages", None)
     if isinstance(messages, list):
         for message in reversed(messages):
             msg_content = getattr(message, "content", None)
             if isinstance(msg_content, str) and msg_content.strip():
-                return msg_content
+                return strip_thinking_tags(msg_content)
             msg_reasoning = getattr(message, "reasoning_content", None)
             if isinstance(msg_reasoning, str) and msg_reasoning.strip():
-                return msg_reasoning
+                return strip_thinking_tags(msg_reasoning)
 
     return ""

@@ -50,7 +50,7 @@ from bitdoze_bot.discord_tool_fallback import (
 )
 from bitdoze_bot.run_monitor import RunMonitor
 from bitdoze_bot.tool_permissions import ToolPermissionError, tool_runtime_context
-from bitdoze_bot.utils import extract_response_text, parse_bool, read_text_if_exists
+from bitdoze_bot.utils import extract_response_text, parse_bool, read_text_if_exists, strip_thinking_tags
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,9 @@ class RuntimeConfig:
     watchdog_max_reports: int = 5
     fallback_denied_tools: tuple[str, ...] = ("shell", "discord")
     session_id_strategy: str = "channel_user"
+    model_provider: str = "openai_like"
+    model_id: str = ""
+    model_base_url: str = ""
     monitor: RunMonitor | None = None
 
 
@@ -95,6 +98,8 @@ def load_runtime_config(config: Config) -> RuntimeConfig:
     monitoring_cfg = monitoring_raw if isinstance(monitoring_raw, dict) else {}
     fallback_raw = config.get("tool_fallback", default={})
     fallback_cfg = fallback_raw if isinstance(fallback_raw, dict) else {}
+    model_raw = config.get("model", default={})
+    model_cfg = model_raw if isinstance(model_raw, dict) else {}
     session_id_strategy_raw = str(cfg.get("session_id_strategy", "channel_user")).strip().lower()
     if session_id_strategy_raw not in {"channel", "user", "channel_user"}:
         session_id_strategy_raw = "channel_user"
@@ -131,6 +136,9 @@ def load_runtime_config(config: Config) -> RuntimeConfig:
         ),
         fallback_denied_tools=denied_tools,
         session_id_strategy=session_id_strategy_raw,
+        model_provider=str(model_cfg.get("provider", "openai_like")),
+        model_id=str(model_cfg.get("id", "")),
+        model_base_url=str(model_cfg.get("base_url", "")),
         monitor=monitor,
     )
 
@@ -363,7 +371,13 @@ async def _run_agent(
     runtime_cfg: RuntimeConfig | None = None,
 ) -> str:
     cfg = runtime_cfg or RuntimeConfig()
-    response_input = _build_response_input(user_context, content)
+    response_input = _build_response_input(
+        user_context,
+        content,
+        model_provider=cfg.model_provider,
+        model_id=cfg.model_id,
+        model_base_url=cfg.model_base_url,
+    )
     target_name = _agent_name(agent)
     target_kind = "team" if _is_team_target(agent) else "agent"
     members = _target_members(agent)
@@ -507,7 +521,13 @@ async def _run_agent_streaming(
 ) -> tuple[str, discord.Message | None]:
     """Run agent with streaming, progressively editing a Discord message."""
     cfg = runtime_cfg or RuntimeConfig()
-    response_input = _build_response_input(user_context, content)
+    response_input = _build_response_input(
+        user_context,
+        content,
+        model_provider=cfg.model_provider,
+        model_id=cfg.model_id,
+        model_base_url=cfg.model_base_url,
+    )
     target_name = _agent_name(agent)
     monitor_token = None
     if cfg.monitor is not None:
@@ -520,6 +540,7 @@ async def _run_agent_streaming(
         )
     started_at = perf_counter()
     accumulated = ""
+    raw_accumulated = ""
     sent_message: discord.Message | None = None
     last_edit_time: float = 0
     edit_interval = cfg.streaming_edit_interval
@@ -569,7 +590,8 @@ async def _run_agent_streaming(
                 if event_type == RunEvent.run_content.value:
                     delta = getattr(event, "content", None)
                     if isinstance(delta, str):
-                        accumulated += delta
+                        raw_accumulated += delta
+                        accumulated = strip_thinking_tags(raw_accumulated)
 
                     now = perf_counter()
                     if accumulated and (now - last_edit_time) >= edit_interval:
@@ -606,7 +628,8 @@ async def _run_agent_streaming(
     model = getattr(final_response, "model", None) if final_response else None
     metrics = _extract_metrics(final_response) if final_response else {}
     if not accumulated:
-        accumulated = extract_response_text(final_response) if final_response else ""
+        fallback_text = extract_response_text(final_response) if final_response else ""
+        accumulated = strip_thinking_tags(raw_accumulated) or fallback_text
     metrics = _ensure_token_metrics(metrics, response_input, accumulated)
     logger.info(
         (
