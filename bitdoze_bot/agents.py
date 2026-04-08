@@ -20,7 +20,6 @@ from agno.learn import (
     UserProfileConfig,
 )
 from agno.knowledge import Knowledge
-from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.models.openai.like import OpenAILike
 from agno.session import SessionSummaryManager
 from agno.skills import LocalSkills, SkillLoader, Skills
@@ -40,6 +39,7 @@ from bitdoze_bot.cognee import CogneeClient, load_cognee_config
 from bitdoze_bot.cognee_tools import CogneeTools
 from bitdoze_bot.config import Config
 from bitdoze_bot.discovery_tools import DiscoveryTools
+from bitdoze_bot.embedder import build_embedder
 from bitdoze_bot.tool_permissions import ToolPermissionManager, get_tool_runtime_context
 from bitdoze_bot.utils import read_text_if_exists
 
@@ -526,12 +526,11 @@ def _build_knowledge(config: Config) -> tuple[Any, Any]:
         return None, None
 
     backend = str(kb_cfg.get("backend", "lancedb")).lower()
-    embedder_id = kb_cfg.get("embedder", "text-embedding-3-small")
-    embedder = OpenAIEmbedder(id=embedder_id)
+    embedder = build_embedder(config)
     logger.info(
         "Knowledge enabled backend=%s embedder=%s table=%s learnings_table=%s",
         backend,
-        embedder_id,
+        embedder.id,
         kb_cfg.get("table_name", "bitdoze_knowledge"),
         kb_cfg.get("learnings_table_name", "bitdoze_learnings"),
     )

@@ -109,7 +109,7 @@ memory:
 knowledge:
     enabled: false # set to true after running setup_knowledge.py
     backend: lancedb # lancedb (file-based, no docker) or pgvector (requires PostgreSQL)
-    embedder: text-embedding-3-small
+    embedder: text-embedding-3-small # model id; or dict with id/base_url/api_key_env (defaults to model.*)
     # LanceDb settings (used when backend=lancedb)
     lance_uri: data/lancedb
     table_name: bitdoze_knowledge
